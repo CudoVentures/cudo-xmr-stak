@@ -39,10 +39,10 @@ pack-linux:
     - linux
   before_script:
     - apt update
-    - apt install -y libmicrohttpd-dev libssl-dev cmake build-essential libhwloc-dev git ocl-icd-opencl-dev wget
+    - apt install -y libssl-dev cmake build-essential libhwloc-dev git ocl-icd-opencl-dev wget
     - wget https://storage.googleapis.com/cudo-download/tools/AMD-APP-SDK-v3.0.130.136-GA-linux64.sh
     - chmod +x AMD-APP-SDK-v3.0.130.136-GA-linux64.sh
-    - ./AMD-APP-SDK-v3.0.130.136-GA-linux64.sh
+    - ./AMD-APP-SDK-v3.0.130.136-GA-linux64.sh -- --acceptEULA 'yes' -s
   script:
     - mkdir build-linux
     - cd build-linux
@@ -50,7 +50,7 @@ pack-linux:
     - make install
   artifacts:
     paths:
-      - build-linux/bin/Release
+      - build-linux/bin
 
 pack-mac:
   stage: build
@@ -65,13 +65,13 @@ pack-mac:
   script:
     - mkdir build-mac
     - cd build-mac
-    - cmake .. -DOPENSSL_ROOT_DIR=/usr/local/opt/openssl -DCUDA_ENABLE=OFF -DOpenCL_ENABLE=ON
+    - cmake .. -DOPENSSL_ROOT_DIR=/usr/local/opt/openssl -DCUDA_ENABLE=ON -DOpenCL_ENABLE=ON
     - make install
   artifacts:
     paths:
-      - build-mac/bin/Release
+      - build-mac/bin
 
-upload-prebuilds:
+upload:
   stage: publish
   image:
     name: gcr.io/cloud-builders/gsutil
@@ -92,7 +92,10 @@ upload-prebuilds:
     - linux
   script:
     - "VERSION=$(grep -m1 version package.json | awk -F: '{ print $2 }' | sed 's/[\", ]//g')"
-    - tar -czvf win-$VERSION.tar.gz build-win/bin/*.dll build-win/bin/xmr-stak.exe
+    - tar -czvf win-$VERSION.tar.gz build-win/bin/Release/*.dll build-win/bin/Release/xmr-stak.exe
     - tar -czvf linux-$VERSION.tar.gz build-linux/bin/xmr-stak
     - tar -czvf mac-$VERSION.tar.gz build-mac/bin/xmr-stak
     - ls -l
+    - gs cp win-$VERSION.tar.gz gs://cudo-download/images/cudo-xmr-stak/win/x64/$VERSION.tar.gz
+    - gs cp linux-$VERSION.tar.gz gs://cudo-download/images/cudo-xmr-stak/linux/x64/$VERSION.tar.gz
+    - gs cp mac-$VERSION.tar.gz gs://cudo-download/images/cudo-xmr-stak/mac/x64/$VERSION.tar.gz
