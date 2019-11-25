@@ -61,7 +61,7 @@ module.exports = () => {
       '-u', ctx.poolUser,
       '-p', 'x',
       '-r', 'worker',
-      '--noTest', true,
+      '--noTest',
       '--h-print-time', 1,
       '--currency', ctx.workload.algorithmId
     ]
