@@ -50,6 +50,7 @@ pack-linux:
   artifacts:
     paths:
       - build-linux/bin/xmr-stak-rx
+      - build-win/bin/Release/*.so
 
 pack-mac:
   stage: build
