@@ -13,13 +13,17 @@
   * along with this program.  If not, see <http://www.gnu.org/licenses/>.
   */
 
-#include "xmrstak/backend/amd/OclCryptonightR_gen.hpp"
 #include "xmrstak/backend/cryptonight.hpp"
 #include "xmrstak/jconf.hpp"
 #include "xmrstak/net/msgstruct.hpp"
 #include "xmrstak/params.hpp"
 #include "xmrstak/picosha2/picosha2.hpp"
 #include "xmrstak/version.hpp"
+#include "xmrstak/backend/cpu/crypto/cryptonight_1.h"
+#include "xmrstak/backend/amd/amd_gpu/opencl/RandomX/randomx_run_gfx803.h"
+#include "xmrstak/backend/amd/amd_gpu/opencl/RandomX/randomx_run_gfx900.h"
+#include "xmrstak/backend/cpu/crypto/randomx/randomx.h"
+#include "xmrstak/params.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -69,21 +73,11 @@ static inline void port_sleep(size_t sec)
 {
 	sleep(sec);
 }
-#endif // _WIN32
-
-#if 0
-static inline long long unsigned int int_port(size_t i)
-{
-	return i;
-}
-#endif
+#endif// _WIN32
 
 #include "gpu.hpp"
 
-#if 0
-void printer::inst()->print_msg(L1,const char* fmt, ...);
-void printer::inst()->print_str(const char* str);
-#endif
+cl_mem GpuContext::rx_dataset[32] = {};
 
 char* LoadTextFile(const char* filename)
 {
@@ -124,20 +118,12 @@ size_t InitOpenCLGpu(cl_context opencl_ctx, GpuContext* ctx, const char* source_
 	}
 
 	auto neededAlgorithms = ::jconf::inst()->GetCurrentCoinSelection().GetAllAlgorithms();
-	bool useCryptonight_gpu = std::find(neededAlgorithms.begin(), neededAlgorithms.end(), cryptonight_gpu) != neededAlgorithms.end();
 
-	if(useCryptonight_gpu)
-	{
-		// work cn_1 we use 16x more threads than configured by the user
-		MaximumWorkSize /= 16;
-	}
-	else
-	{
-		/* Some kernel spawn 8 times more threads than the user is configuring.
-		 * To give the user the correct maximum work size we divide the hardware specific max by 8.
-		 */
-		MaximumWorkSize /= 8;
-	}
+	/* Some kernel spawn 8 times more threads than the user is configuring.
+	 * To give the user the correct maximum work size we divide the hardware specific max by 8.
+	 */
+	MaximumWorkSize /= 8;
+
 	printer::inst()->print_msg(L1, "Device %lu work size %lu / %lu.", ctx->deviceIdx, ctx->workSize, MaximumWorkSize);
 
 	if(ctx->workSize > MaximumWorkSize)
@@ -147,12 +133,6 @@ size_t InitOpenCLGpu(cl_context opencl_ctx, GpuContext* ctx, const char* source_
 	}
 
 	const std::string backendName = xmrstak::params::inst().openCLVendor;
-	if((ctx->stridedIndex == 2 || ctx->stridedIndex == 3) && (ctx->rawIntensity % ctx->workSize) != 0)
-	{
-		size_t reduced_intensity = (ctx->rawIntensity / ctx->workSize) * ctx->workSize;
-		ctx->rawIntensity = reduced_intensity;
-		printer::inst()->print_msg(L0, "WARNING %s: gpu %d intensity is not a multiple of 'worksize', auto reduce intensity to %d", backendName.c_str(), ctx->deviceIdx, int(reduced_intensity));
-	}
 
 #if defined(CL_VERSION_2_0) && !defined(CONF_ENFORCE_OpenCL_1_2)
 	const cl_queue_properties CommandQueueProperties[] = {0, 0, 0};
@@ -188,49 +168,88 @@ size_t InitOpenCLGpu(cl_context opencl_ctx, GpuContext* ctx, const char* source_
 	}
 
 	size_t g_thd = ctx->rawIntensity;
-	ctx->ExtraBuffers[0] = clCreateBuffer(opencl_ctx, CL_MEM_READ_WRITE, scratchPadSize * g_thd, NULL, &ret);
+
+	// in randomX we have only one algorithm
+	auto user_algo = neededAlgorithms[0];
+
+
+	const size_t dataset_size = getRandomXDatasetSize();
+
+	if(!ctx->rx_dataset[ctx->deviceIdx])
+	{
+		if(!ctx->datasetHost)
+		{
+			ctx->rx_dataset[ctx->deviceIdx] = clCreateBuffer(opencl_ctx, CL_MEM_READ_ONLY, dataset_size, nullptr, &ret);
+		}
+		else {
+			void* dataset = getRandomXDataset();
+			ctx->rx_dataset[ctx->deviceIdx] = clCreateBuffer(opencl_ctx, CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR, dataset_size, dataset, &ret);
+		}
+
+		if(ret != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "Error %s when calling clCreateBuffer to create RandomX dataset.", err_to_str(ret));
+			return ERR_OCL_API;
+		}
+	}
+
+	ctx->rx_scratchpads = clCreateBuffer(opencl_ctx, CL_MEM_READ_WRITE, (user_algo.Mem() + 64) * g_thd, nullptr, &ret);
 	if(ret != CL_SUCCESS)
 	{
-		printer::inst()->print_msg(L1, "Error %s when calling clCreateBuffer to create hash scratchpads buffer.", err_to_str(ret));
+		printer::inst()->print_msg(L1, "Error %s when calling clCreateBuffer to create RandomX scratchpads.", err_to_str(ret));
 		return ERR_OCL_API;
 	}
 
-	ctx->ExtraBuffers[1] = clCreateBuffer(opencl_ctx, CL_MEM_READ_WRITE, 200 * g_thd, NULL, &ret);
+	ctx->rx_hashes = clCreateBuffer(opencl_ctx, CL_MEM_READ_WRITE, 64 * g_thd, nullptr, &ret);
 	if(ret != CL_SUCCESS)
 	{
-		printer::inst()->print_msg(L1, "Error %s when calling clCreateBuffer to create hash states buffer.", err_to_str(ret));
+		printer::inst()->print_msg(L1, "Error %s when calling clCreateBuffer to create RandomX hashes buffer.", err_to_str(ret));
 		return ERR_OCL_API;
 	}
 
-	// Blake-256 branches
-	ctx->ExtraBuffers[2] = clCreateBuffer(opencl_ctx, CL_MEM_READ_WRITE, sizeof(cl_uint) * (g_thd + 2), NULL, &ret);
+	ctx->rx_entropy = clCreateBuffer(opencl_ctx, CL_MEM_READ_WRITE, (128 + 2560) * g_thd, nullptr, &ret);
 	if(ret != CL_SUCCESS)
 	{
-		printer::inst()->print_msg(L1, "Error %s when calling clCreateBuffer to create Branch 0 buffer.", err_to_str(ret));
+		printer::inst()->print_msg(L1, "Error %s when calling clCreateBuffer to create RandomX entropy buffer.", err_to_str(ret));
 		return ERR_OCL_API;
 	}
 
-	// Groestl-256 branches
-	ctx->ExtraBuffers[3] = clCreateBuffer(opencl_ctx, CL_MEM_READ_WRITE, sizeof(cl_uint) * (g_thd + 2), NULL, &ret);
-	if(ret != CL_SUCCESS)
+	if(ctx->gcnAsm)
 	{
-		printer::inst()->print_msg(L1, "Error %s when calling clCreateBuffer to create Branch 1 buffer.", err_to_str(ret));
-		return ERR_OCL_API;
+		ctx->rx_registers = clCreateBuffer(opencl_ctx, CL_MEM_READ_WRITE, 256 * g_thd, nullptr, &ret);
+		if(ret != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "Error %s when calling clCreateBuffer to create RandomX JIT registers buffer.", err_to_str(ret));
+			return ERR_OCL_API;
+		}
+
+		ctx->rx_intermediate_programs = clCreateBuffer(opencl_ctx, CL_MEM_READ_WRITE, 5120 * g_thd, nullptr, &ret);
+		if(ret != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "Error %s when calling clCreateBuffer to create RandomX JIT intermediate programs buffer.", err_to_str(ret));
+			return ERR_OCL_API;
+		}
+
+		ctx->rx_programs = clCreateBuffer(opencl_ctx, CL_MEM_READ_WRITE, 10048 * g_thd, nullptr, &ret);
+		if(ret != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "Error %s when calling clCreateBuffer to create RandomX JIT programs buffer.", err_to_str(ret));
+			return ERR_OCL_API;
+		}
+	}
+	else {
+		ctx->rx_vm_states = clCreateBuffer(opencl_ctx, CL_MEM_READ_WRITE, 2560 * g_thd, nullptr, &ret);
+		if(ret != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "Error %s when calling clCreateBuffer to create RandomX VM states buffer.", err_to_str(ret));
+			return ERR_OCL_API;
+		}
 	}
 
-	// JH-256 branches
-	ctx->ExtraBuffers[4] = clCreateBuffer(opencl_ctx, CL_MEM_READ_WRITE, sizeof(cl_uint) * (g_thd + 2), NULL, &ret);
+	ctx->rx_rounding = clCreateBuffer(opencl_ctx, CL_MEM_READ_WRITE, sizeof(uint32_t) * g_thd, nullptr, &ret);
 	if(ret != CL_SUCCESS)
 	{
-		printer::inst()->print_msg(L1, "Error %s when calling clCreateBuffer to create Branch 2 buffer.", err_to_str(ret));
-		return ERR_OCL_API;
-	}
-
-	// Skein-512 branches
-	ctx->ExtraBuffers[5] = clCreateBuffer(opencl_ctx, CL_MEM_READ_WRITE, sizeof(cl_uint) * (g_thd + 2), NULL, &ret);
-	if(ret != CL_SUCCESS)
-	{
-		printer::inst()->print_msg(L1, "Error %s when calling clCreateBuffer to create Branch 3 buffer.", err_to_str(ret));
+		printer::inst()->print_msg(L1, "Error %s when calling clCreateBuffer to create RandomX rounding buffer.", err_to_str(ret));
 		return ERR_OCL_API;
 	}
 
@@ -242,12 +261,23 @@ size_t InitOpenCLGpu(cl_context opencl_ctx, GpuContext* ctx, const char* source_
 		return ERR_OCL_API;
 	}
 
+	std::vector<char> devVendorVec(1024);
+	if((ret = clGetDeviceInfo(ctx->DeviceID, CL_DEVICE_VENDOR, devVendorVec.size(), devVendorVec.data(), NULL)) != CL_SUCCESS)
+	{
+		printer::inst()->print_msg(L1, "WARNING: %s when calling clGetDeviceInfo to get the device vendor name for device %u.", err_to_str(ret), ctx->deviceIdx);
+		return ERR_OCL_API;
+	}
+
+	std::string devVendor(devVendorVec.data());
+	ctx->vendor = devVendor;
+
 	std::vector<char> devNameVec(1024);
 	if((ret = clGetDeviceInfo(ctx->DeviceID, CL_DEVICE_NAME, devNameVec.size(), devNameVec.data(), NULL)) != CL_SUCCESS)
 	{
 		printer::inst()->print_msg(L1, "WARNING: %s when calling clGetDeviceInfo to get CL_DEVICE_NAME for device %u.", err_to_str(ret), ctx->deviceIdx);
 		return ERR_OCL_API;
 	}
+	ctx->name = std::string(devNameVec.data());
 
 	std::vector<char> openCLDriverVer(1024);
 	if((ret = clGetDeviceInfo(ctx->DeviceID, CL_DRIVER_VERSION, openCLDriverVer.size(), openCLDriverVer.data(), NULL)) != CL_SUCCESS)
@@ -256,6 +286,11 @@ size_t InitOpenCLGpu(cl_context opencl_ctx, GpuContext* ctx, const char* source_
 		return ERR_OCL_API;
 	}
 
+	std::string device_name = ctx->name;
+	std::transform(ctx->name.begin(), ctx->name.end(), device_name.begin(), ::toupper);
+	ctx->gcn_version = ((device_name == "GFX900") || (device_name == "GFX906")) ? 14 : 12;
+	printer::inst()->print_msg(LDEBUG, "AMD: select gcn version %u for '%s'", ctx->gcn_version, device_name.c_str());
+
 	for(const auto miner_algo : neededAlgorithms)
 	{
 		// scratchpad size for the selected mining algorithm
@@ -263,46 +298,8 @@ size_t InitOpenCLGpu(cl_context opencl_ctx, GpuContext* ctx, const char* source_
 		int threadMemMask = miner_algo.Mask();
 		int hashIterations = miner_algo.Iter();
 
-		size_t mem_chunk_exp = 1u << ctx->memChunk;
-		size_t strided_index = ctx->stridedIndex;
-		/* Adjust the config settings to a valid combination
-		 * this is required if the dev pool is mining monero
-		 * but the user tuned there settings for another currency
-		 */
-		if(miner_algo == cryptonight_monero_v8 || miner_algo == cryptonight_v8_reversewaltz)
-		{
-			if(ctx->memChunk < 2)
-				mem_chunk_exp = 1u << 2;
-			if(strided_index == 1)
-				strided_index = 0;
-		}
-
-		if(miner_algo == cryptonight_gpu)
-		{
-			strided_index = 0;
-		}
-
-		if(miner_algo == cryptonight_r || miner_algo == cryptonight_r_wow)
-		{
-			if(ctx->memChunk < 2)
-				mem_chunk_exp = 1u << 2;
-			if(strided_index == 1)
-				strided_index = 0;
-		}
-
-		// if intensity is a multiple of worksize than comp mode is not needed
-		int needCompMode = ctx->compMode && ctx->rawIntensity % ctx->workSize != 0 ? 1 : 0;
-
 		std::string options;
-		options += " -DITERATIONS=" + std::to_string(hashIterations);
-		options += " -DMASK=" + std::to_string(threadMemMask) + "U";
-		options += " -DWORKSIZE=" + std::to_string(ctx->workSize) + "U";
-		options += " -DSTRIDED_INDEX=" + std::to_string(strided_index);
-		options += " -DMEM_CHUNK_EXPONENT=" + std::to_string(mem_chunk_exp) + "U";
-		options += " -DCOMP_MODE=" + std::to_string(needCompMode);
-		options += " -DMEMORY=" + std::to_string(hashMemSize) + "LU";
 		options += " -DALGO=" + std::to_string(miner_algo.Id());
-		options += " -DCN_UNROLL=" + std::to_string(ctx->unroll);
 		/* AMD driver output is something like: `1445.5 (VM)`
 		 * and is mapped to `14` only. The value is only used for a compiler
 		 * workaround.
@@ -315,8 +312,19 @@ size_t InitOpenCLGpu(cl_context opencl_ctx, GpuContext* ctx, const char* source_
 #endif
 		options += " -DIS_WINDOWS_OS=" + std::to_string(isWindowsOs);
 
-		if(miner_algo == cryptonight_gpu)
-			options += " -cl-fp32-correctly-rounded-divide-sqrt";
+		switch(ctx->workSize)
+		{
+			case 2:
+			case 4:
+			case 8:
+			case 16:
+				break;
+			default:
+				ctx->workSize = 8;
+
+		}
+		options += " -DWORKERS_PER_HASH=" + std::to_string(ctx->workSize);
+		options += " -DGCN_VERSION=" + std::to_string(ctx->gcn_version);
 
 		/* create a hash for the compile time cache
 		 * used data:
@@ -455,7 +463,7 @@ size_t InitOpenCLGpu(cl_context opencl_ctx, GpuContext* ctx, const char* source_
 				printer::inst()->print_msg(L1, "Error %s when calling clCreateProgramWithBinary. Try to delete file %s", err_to_str(ret), cache_file.c_str());
 				return ERR_OCL_API;
 			}
-			ret = clBuildProgram(ctx->Program[miner_algo], 1, &ctx->DeviceID, NULL, NULL, NULL);
+			ret = clBuildProgram(ctx->Program[miner_algo], 1, &ctx->DeviceID, options.c_str(), NULL, NULL);
 			if(ret != CL_SUCCESS)
 			{
 				printer::inst()->print_msg(L1, "Error %s when calling clBuildProgram. Try to delete file %s", err_to_str(ret), cache_file.c_str());
@@ -463,39 +471,418 @@ size_t InitOpenCLGpu(cl_context opencl_ctx, GpuContext* ctx, const char* source_
 			}
 		}
 
-		std::vector<std::string> KernelNames = {"cn2", "Blake", "Groestl", "JH", "Skein"};
-		if(miner_algo == cryptonight_gpu)
-		{
-			KernelNames.insert(KernelNames.begin(), "cn1_cn_gpu");
-			KernelNames.insert(KernelNames.begin(), "cn0_cn_gpu");
-		}
-		else
-		{
-			KernelNames.insert(KernelNames.begin(), "cn1");
-			KernelNames.insert(KernelNames.begin(), "cn0");
-		}
-
-		// append algorithm number to kernel name
-		for(int k = 0; k < 3; k++)
-			KernelNames[k] += std::to_string(miner_algo);
-
-		if(miner_algo == cryptonight_gpu)
-		{
-			KernelNames.push_back(std::string("cn00_cn_gpu") + std::to_string(miner_algo));
-		}
-
+		std::vector<std::string> KernelNames = {
+			"fillAes1Rx4_scratchpad", "fillAes4Rx4_entropy", "hashAes1Rx4",
+			"blake2b_initial_hash", "blake2b_hash_registers_32", "blake2b_hash_registers_64",
+			ctx->gcnAsm ? "" : "init_vm", ctx->gcnAsm ? "" : "execute_vm", "find_shares",
+			ctx->gcnAsm ? "randomx_jit" : "",
+			""
+		};
 		for(int i = 0; i < KernelNames.size(); ++i)
 		{
-			ctx->Kernels[miner_algo][i] = clCreateKernel(ctx->Program[miner_algo], KernelNames[i].c_str(), &ret);
+			if(!KernelNames[i][0])
+			{
+				printer::inst()->print_msg(LDEBUG, "AMD: skip kernel %i (no name)", i);
+				continue;
+			}
+			printer::inst()->print_msg(LDEBUG, "AMD: prepare kernel %s", KernelNames[i].c_str());
+			ctx->rx_kernels[i] = clCreateKernel(ctx->Program[miner_algo], KernelNames[i].c_str(), &ret);
 			if(ret != CL_SUCCESS)
 			{
-				printer::inst()->print_msg(L1, "Error %s when calling clCreateKernel for kernel_0 %s.", err_to_str(ret), KernelNames[i].c_str());
+				printer::inst()->print_msg(L1, "ERROR AMD: clCreateKernel %s", KernelNames[i].c_str());
+				return ERR_OCL_API;
+			}
+		}
+		if(ctx->gcnAsm)
+		{
+			// Adrenaline drivers on Windows and amdgpu-pro drivers on Linux use ELF header's flags (offset 0x30) to store internal device ID
+			// Read it from compiled OpenCL code and substitute this ID into pre-compiled binary to make sure the driver accepts it
+			uint32_t elf_header_flags = 0;
+			const uint32_t elf_header_flags_offset = 0x30;
+
+			size_t bin_size;
+			if(clGetProgramInfo(ctx->Program[miner_algo], CL_PROGRAM_BINARY_SIZES, sizeof(bin_size), &bin_size, NULL) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "ERROR AMD: gcnAsm clGetProgramInfo(CL_PROGRAM_BINARY_SIZES)");
+				return ERR_OCL_API;
+			}
+
+			std::vector<char> binary_data(bin_size);
+			char* tmp[1] = { binary_data.data() };
+			if(clGetProgramInfo(ctx->Program[miner_algo], CL_PROGRAM_BINARIES, sizeof(char*), tmp, NULL) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "ERROR AMD: gcnAsm clGetProgramInfo(CL_PROGRAM_BINARIES) bin_size = %u", (uint32_t)bin_size);
+				return false;
+			}
+
+			if(bin_size >= elf_header_flags_offset + sizeof(uint32_t))
+			{
+				elf_header_flags = *(uint32_t*)(binary_data.data() + elf_header_flags_offset);
+			}
+
+			size_t len = (ctx->gcn_version == 14) ? randomx_run_gfx900_bin_size : randomx_run_gfx803_bin_size;
+			unsigned char* binary = (ctx->gcn_version == 14) ? randomx_run_gfx900_bin : randomx_run_gfx803_bin;
+
+			// Set correct internal device ID in the pre-compiled binary
+			if(elf_header_flags)
+			{
+				*(uint32_t*)(binary + elf_header_flags_offset) = elf_header_flags;
+			}
+
+			cl_int status;
+			ctx->AsmProgram = clCreateProgramWithBinary(ctx->opencl_ctx, 1, &ctx->DeviceID, &len, (const unsigned char**) &binary, &status, &ret);
+			if(ret != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "ERROR AMD: gcnAsm clCreateProgramWithBinary");
+				return ERR_OCL_API;
+			}
+
+			ret = clBuildProgram(ctx->AsmProgram, 1, &ctx->DeviceID, options.c_str(), NULL, NULL);
+			if(ret != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "ERROR AMD: gcnAsm clBuildProgram AsmProgram");
+				return ERR_OCL_API;
+			}
+
+			ctx->rx_kernels[10] = clCreateKernel(ctx->AsmProgram, "randomx_run", &ret);
+			if(ret != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "ERROR AMD: gcnAsm clBuildProgram randomx_run");
+				return ERR_OCL_API;
+			}
+		}
+
+		// fillAes1Rx4_scratchpad
+		if((ret = clSetKernelArg(ctx->rx_kernels[0], 0, sizeof(cl_mem), &ctx->rx_hashes)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 0, 0);
+			return ERR_OCL_API;
+		}
+
+		if((ret = clSetKernelArg(ctx->rx_kernels[0], 1, sizeof(cl_mem), &ctx->rx_scratchpads)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 0, 1);
+			return ERR_OCL_API;
+		}
+
+		const uint32_t batch_size = g_thd;
+		if((ret = clSetKernelArg(ctx->rx_kernels[0], 2, sizeof(uint32_t), &batch_size)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 0, 2);
+			return ERR_OCL_API;
+		}
+
+		const uint32_t rx_version = (miner_algo == randomX_wow) ? 103 : 104;
+		if((ret = clSetKernelArg(ctx->rx_kernels[0], 3, sizeof(uint32_t), &rx_version)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 0, 3);
+			return ERR_OCL_API;
+		}
+
+		// fillAes4Rx4_entropy
+		if((ret = clSetKernelArg(ctx->rx_kernels[1], 0, sizeof(cl_mem), &ctx->rx_hashes)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 1, 0);
+			return ERR_OCL_API;
+		}
+
+		if((ret = clSetKernelArg(ctx->rx_kernels[1], 1, sizeof(cl_mem), &ctx->rx_entropy)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 1, 1);
+			return ERR_OCL_API;
+		}
+
+		if((ret = clSetKernelArg(ctx->rx_kernels[1], 2, sizeof(uint32_t), &batch_size)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 1, 2);
+			return ERR_OCL_API;
+		}
+
+		if((ret = clSetKernelArg(ctx->rx_kernels[1], 3, sizeof(uint32_t), &rx_version)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 1, 3);
+			return ERR_OCL_API;
+		}
+
+		// hashAes1Rx4
+		if((ret = clSetKernelArg(ctx->rx_kernels[2], 0, sizeof(cl_mem), &ctx->rx_scratchpads)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 2, 0);
+			return ERR_OCL_API;
+		}
+
+		if((ret = clSetKernelArg(ctx->rx_kernels[2], 1, sizeof(cl_mem), ctx->gcnAsm ? &ctx->rx_registers : &ctx->rx_vm_states)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 2, 1);
+			return ERR_OCL_API;
+		}
+
+		const uint32_t hashOffsetBytes = 192;
+		if((ret = clSetKernelArg(ctx->rx_kernels[2], 2, sizeof(uint32_t), &hashOffsetBytes)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 2, 2);
+			return ERR_OCL_API;
+		}
+
+		uint32_t hashStrideBytes;
+		if(ctx->gcnAsm)
+			hashStrideBytes = 256;
+		else
+			hashStrideBytes = (miner_algo == randomX_loki) ? RandomX_LokiConfig.ProgramSize * 8 : RandomX_MoneroConfig.ProgramSize * 8;
+
+		if((ret = clSetKernelArg(ctx->rx_kernels[2], 3, sizeof(uint32_t), &hashStrideBytes)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 2, 3);
+			return ERR_OCL_API;
+		}
+
+		if((ret = clSetKernelArg(ctx->rx_kernels[2], 4, sizeof(uint32_t), &batch_size)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 2, 4);
+			return ERR_OCL_API;
+		}
+
+		// blake2b_initial_hash
+		if((ret = clSetKernelArg(ctx->rx_kernels[3], 0, sizeof(cl_mem), &ctx->rx_hashes)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 3, 0);
+			return ERR_OCL_API;
+		}
+
+		if((ret = clSetKernelArg(ctx->rx_kernels[3], 1, sizeof(cl_mem), &ctx->InputBuffer)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 3, 1);
+			return ERR_OCL_API;
+		}
+
+		// blockTemplateSize is set in RXSetJob()
+		// start_nonce is set in RXRunJob()
+
+		// blake2b_hash_registers_32
+		if((ret = clSetKernelArg(ctx->rx_kernels[4], 0, sizeof(cl_mem), &ctx->rx_hashes)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 4, 0);
+			return ERR_OCL_API;
+		}
+
+		if((ret = clSetKernelArg(ctx->rx_kernels[4], 1, sizeof(cl_mem), ctx->gcnAsm ? &ctx->rx_registers : &ctx->rx_vm_states)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 4, 1);
+			return ERR_OCL_API;
+		}
+
+		if((ret = clSetKernelArg(ctx->rx_kernels[4], 2, sizeof(uint32_t), &hashStrideBytes)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 4, 2);
+			return ERR_OCL_API;
+		}
+
+		// blake2b_hash_registers_64
+		if((ret = clSetKernelArg(ctx->rx_kernels[5], 0, sizeof(cl_mem), &ctx->rx_hashes)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 5, 0);
+			return ERR_OCL_API;
+		}
+
+		if((ret = clSetKernelArg(ctx->rx_kernels[5], 1, sizeof(cl_mem), ctx->gcnAsm ? &ctx->rx_registers : &ctx->rx_vm_states)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 5, 1);
+			return ERR_OCL_API;
+		}
+
+		if((ret = clSetKernelArg(ctx->rx_kernels[5], 2, sizeof(uint32_t), &hashStrideBytes)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 5, 2);
+			return ERR_OCL_API;
+		}
+
+		if(!ctx->gcnAsm)
+		{
+			// init_vm
+			if((ret = clSetKernelArg(ctx->rx_kernels[6], 0, sizeof(cl_mem), &ctx->rx_entropy)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 6, 0);
+				return ERR_OCL_API;
+			}
+
+			if((ret = clSetKernelArg(ctx->rx_kernels[6], 1, sizeof(cl_mem), &ctx->rx_vm_states)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 6, 1);
+				return ERR_OCL_API;
+			}
+
+			if((ret = clSetKernelArg(ctx->rx_kernels[6], 2, sizeof(cl_mem), &ctx->rx_rounding)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 6, 2);
+				return ERR_OCL_API;
+			}
+
+			// iteration is set in RXRunJob()
+
+			// execute_vm
+			if((ret = clSetKernelArg(ctx->rx_kernels[7], 0, sizeof(cl_mem), &ctx->rx_vm_states)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 7, 0);
+				return ERR_OCL_API;
+			}
+
+			if((ret = clSetKernelArg(ctx->rx_kernels[7], 1, sizeof(cl_mem), &ctx->rx_rounding)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 7, 1);
+				return ERR_OCL_API;
+			}
+
+			if((ret = clSetKernelArg(ctx->rx_kernels[7], 2, sizeof(cl_mem), &ctx->rx_scratchpads)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 7, 2);
+				return ERR_OCL_API;
+			}
+
+			if((ret = clSetKernelArg(ctx->rx_kernels[7], 3, sizeof(cl_mem), &ctx->rx_dataset[ctx->deviceIdx])) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 7, 3);
+				return ERR_OCL_API;
+			}
+
+			if((ret = clSetKernelArg(ctx->rx_kernels[7], 4, sizeof(uint32_t), &batch_size)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 7, 4);
+				return ERR_OCL_API;
+			}
+
+			// num_iterations, first, last are set in RXRunJob()
+		}
+
+		// find_shares
+		if((ret = clSetKernelArg(ctx->rx_kernels[8], 0, sizeof(cl_mem), &ctx->rx_hashes)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 8, 0);
+			return ERR_OCL_API;
+		}
+
+		// target is set in RXSetJob()
+		// start_nonce is set in RXRunJob()
+
+		if((ret = clSetKernelArg(ctx->rx_kernels[8], 3, sizeof(cl_mem), &ctx->OutputBuffer)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 8, 3);
+			return ERR_OCL_API;
+		}
+
+		if(ctx->gcnAsm)
+		{
+			// randomx_jit
+			if((ret = clSetKernelArg(ctx->rx_kernels[9], 0, sizeof(cl_mem), &ctx->rx_entropy)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 9, 0);
+				return ERR_OCL_API;
+			}
+
+			if((ret = clSetKernelArg(ctx->rx_kernels[9], 1, sizeof(cl_mem), &ctx->rx_registers)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 9, 1);
+				return ERR_OCL_API;
+			}
+
+			if((ret = clSetKernelArg(ctx->rx_kernels[9], 2, sizeof(cl_mem), &ctx->rx_intermediate_programs)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 9, 2);
+				return ERR_OCL_API;
+			}
+
+			if((ret = clSetKernelArg(ctx->rx_kernels[9], 3, sizeof(cl_mem), &ctx->rx_programs)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 9, 3);
+				return ERR_OCL_API;
+			}
+
+			if((ret = clSetKernelArg(ctx->rx_kernels[9], 4, sizeof(uint32_t), &batch_size)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 9, 4);
+				return ERR_OCL_API;
+			}
+
+			if((ret = clSetKernelArg(ctx->rx_kernels[9], 5, sizeof(cl_mem), &ctx->rx_rounding)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 9, 5);
+				return ERR_OCL_API;
+			}
+
+			// iteration is set in RXRunJob()
+
+			// randomx_run
+			if((ret = clSetKernelArg(ctx->rx_kernels[10], 0, sizeof(cl_mem), &ctx->rx_dataset[ctx->deviceIdx])) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 10, 0);
+				return ERR_OCL_API;
+			}
+
+			if((ret = clSetKernelArg(ctx->rx_kernels[10], 1, sizeof(cl_mem), &ctx->rx_scratchpads)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 10, 1);
+				return ERR_OCL_API;
+			}
+
+			if((ret = clSetKernelArg(ctx->rx_kernels[10], 2, sizeof(cl_mem), &ctx->rx_registers)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 10, 2);
+				return ERR_OCL_API;
+			}
+
+			if((ret = clSetKernelArg(ctx->rx_kernels[10], 3, sizeof(cl_mem), &ctx->rx_rounding)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 10, 3);
+				return ERR_OCL_API;
+			}
+
+			if((ret = clSetKernelArg(ctx->rx_kernels[10], 4, sizeof(cl_mem), &ctx->rx_programs)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 10, 4);
+				return ERR_OCL_API;
+			}
+
+			if((ret = clSetKernelArg(ctx->rx_kernels[10], 5, sizeof(uint32_t), &batch_size)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 10, 5);
+				return ERR_OCL_API;
+			}
+
+			auto PowerOf2 = [](size_t N)
+			{
+				uint32_t result = 0;
+				while (N > 1)
+				{
+					++result;
+					N >>= 1;
+				}
+				return result;
+			};
+
+			const RandomX_ConfigurationBase* rx_conf;
+			if(miner_algo == randomX_loki)
+				rx_conf = &RandomX_LokiConfig;
+			else if(miner_algo == randomX_wow)
+				rx_conf = &RandomX_WowneroConfig;
+			else if(miner_algo == randomX)
+				rx_conf = &RandomX_MoneroConfig;
+
+			const uint32_t rx_parameters =
+				(PowerOf2(rx_conf->ScratchpadL1_Size) << 0) |
+				(PowerOf2(rx_conf->ScratchpadL2_Size) << 5) |
+				(PowerOf2(rx_conf->ScratchpadL3_Size) << 10) |
+				(PowerOf2(rx_conf->ProgramIterations) << 15);
+			;
+
+			if((ret = clSetKernelArg(ctx->rx_kernels[10], 6, sizeof(uint32_t), &rx_parameters)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1, "clSetKernelArg fail %s %i %i", err_to_str(ret), 10, 6);
 				return ERR_OCL_API;
 			}
 		}
 	}
+
 	ctx->Nonce = 0;
-	return 0;
+	return CL_SUCCESS;
 }
 
 const cl_platform_info attributeTypes[5] = {
@@ -624,7 +1011,7 @@ std::vector<GpuContext> getAMDDevices(int index)
 
 			bool isHSAOpenCL = std::string(openCLDriverVer.data()).find("HSA") != std::string::npos;
 
-			// if environment variable GPU_SINGLE_ALLOC_PERCENT is not set we can not allocate the full memory
+			// ifenvironment variable GPU_SINGLE_ALLOC_PERCENT is not set we can not allocate the full memory
 			ctx.deviceIdx = k;
 			ctx.name = std::string(devNameVec.data());
 			ctx.DeviceID = device_list[k];
@@ -654,7 +1041,7 @@ int getAMDPlatformIdx()
 	clStatus = clGetPlatformIDs(numPlatforms, platforms, NULL);
 
 	int platformIndex = -1;
-	// Mesa OpenCL is the fallback if no AMD or Apple OpenCL is found
+	// Mesa OpenCL is the fallback ifno AMD or Apple OpenCL is found
 	int mesaPlatform = -1;
 
 	if(clStatus == CL_SUCCESS)
@@ -680,7 +1067,7 @@ int getAMDPlatformIdx()
 					mesaPlatform = i;
 				else
 				{
-					// exit if AMD or Apple platform is found
+					// exit ifAMD or Apple platform is found
 					platformIndex = i;
 					break;
 				}
@@ -787,49 +1174,59 @@ size_t InitOpenCL(GpuContext* ctx, size_t num_gpus, size_t platform_idx)
 		return ERR_OCL_API;
 	}
 
-	const char* fastIntMathV2CL =
-#include "./opencl/fast_int_math_v2.cl"
-		;
-	const char* fastDivHeavyCL =
-#include "./opencl/fast_div_heavy.cl"
-		;
-	const char* cryptonightCL =
-#include "./opencl/cryptonight.cl"
-		;
-	const char* blake256CL =
-#include "./opencl/blake256.cl"
-		;
-	const char* groestl256CL =
-#include "./opencl/groestl256.cl"
-		;
-	const char* jhCL =
-#include "./opencl/jh.cl"
-		;
-	const char* wolfAesCL =
-#include "./opencl/wolf-aes.cl"
-		;
-	const char* wolfSkeinCL =
-#include "./opencl/wolf-skein.cl"
-		;
-	const char* cryptonight_gpu =
-#include "./opencl/cryptonight_gpu.cl"
-		;
+	auto neededAlgorithms = ::jconf::inst()->GetCurrentCoinSelection().GetAllAlgorithms();
+	// use the first algo to check for randomX
+	auto user_algo = neededAlgorithms[0];
 
-	std::string source_code(cryptonightCL);
-	source_code = std::regex_replace(source_code, std::regex("XMRSTAK_INCLUDE_FAST_INT_MATH_V2"), fastIntMathV2CL);
-	source_code = std::regex_replace(source_code, std::regex("XMRSTAK_INCLUDE_FAST_DIV_HEAVY"), fastDivHeavyCL);
-	source_code = std::regex_replace(source_code, std::regex("XMRSTAK_INCLUDE_WOLF_AES"), wolfAesCL);
-	source_code = std::regex_replace(source_code, std::regex("XMRSTAK_INCLUDE_WOLF_SKEIN"), wolfSkeinCL);
-	source_code = std::regex_replace(source_code, std::regex("XMRSTAK_INCLUDE_JH"), jhCL);
-	source_code = std::regex_replace(source_code, std::regex("XMRSTAK_INCLUDE_BLAKE256"), blake256CL);
-	source_code = std::regex_replace(source_code, std::regex("XMRSTAK_INCLUDE_GROESTL256"), groestl256CL);
-	source_code = std::regex_replace(source_code, std::regex("XMRSTAK_INCLUDE_CN_GPU"), cryptonight_gpu);
+	std::string source_code;
+
+	const char* randomx_constants_wow_h =
+		#include "./opencl/RandomX/randomx_constants_wow.h"
+	;
+	const char* randomx_constants_loki_h =
+		#include "./opencl/RandomX/randomx_constants_loki.h"
+	;
+	const char* randomx_constants_monero_h =
+		#include "./opencl/RandomX/randomx_constants_monero.h"
+	;
+	const char* aesCL =
+		#include "./opencl/RandomX/aes.cl"
+	;
+	const char* fillAes1Rx4CL =
+		#include "./opencl/RandomX/fillAes1Rx4.cl"
+	;
+	const char* blake2bCL =
+		#include "./opencl/RandomX/blake2b.cl"
+	;
+	const char* blake2b_double_blockCL =
+		#include "./opencl/RandomX/blake2b_double_block.cl"
+	;
+	const char* randomx_vmCL =
+		#include "./opencl/RandomX/randomx_vm.cl"
+	;
+	const char* randomx_jitCL =
+		#include "./opencl/RandomX/randomx_jit.cl"
+	;
+
+	if(user_algo == randomX_wow)
+		source_code.append(randomx_constants_wow_h);
+	else if(user_algo == randomX_loki)
+		source_code.append(randomx_constants_loki_h);
+	else if(user_algo == randomX)
+		source_code.append(randomx_constants_monero_h);
+
+	source_code.append(std::regex_replace(aesCL, std::regex("#include \"fillAes1Rx4.cl\""), fillAes1Rx4CL));
+	source_code.append(std::regex_replace(blake2bCL, std::regex("#include \"blake2b_double_block.cl\""), blake2b_double_blockCL));
+	source_code.append(randomx_vmCL);
+	source_code.append(randomx_jitCL);
 
 	// create a directory  for the OpenCL compile cache
 	const std::string cache_dir = xmrstak::params::inst().rootAMDCacheDir;
 	create_directory(cache_dir);
 
 	std::vector<std::shared_ptr<InterleaveData>> interleaveData(num_gpus, nullptr);
+
+	std::map<size_t, bool> overview;
 
 	for(int i = 0; i < num_gpus; ++i)
 	{
@@ -855,268 +1252,18 @@ size_t InitOpenCL(GpuContext* ctx, size_t num_gpus, size_t platform_idx)
 		{
 			return ret;
 		}
+
+		bool known_index = overview.find(devIdx) != overview.end();
+		overview[devIdx] = true;
+		if(!known_index)
+			xmrstak::params::inst().opencl_devices.emplace_back(
+				xmrstak::system_entry{ctx[i].vendor + " " + ctx[i].name, ctx[i].rawIntensity});
 	}
 
 	return ERR_SUCCESS;
 }
 
-size_t XMRSetJob(GpuContext* ctx, uint8_t* input, size_t input_len, uint64_t target, const xmrstak_algo& miner_algo, uint64_t height)
-{
 
-	auto& Kernels = ctx->Kernels[miner_algo.Id()];
-
-	cl_int ret;
-
-	if(input_len > 124)
-		return ERR_STUPID_PARAMS;
-
-	input[input_len] = 0x01;
-	memset(input + input_len + 1, 0, 128 - input_len - 1);
-
-	cl_uint numThreads = ctx->rawIntensity;
-
-	if((ret = clEnqueueWriteBuffer(ctx->CommandQueues, ctx->InputBuffer, CL_TRUE, 0, 128, input, 0, NULL, NULL)) != CL_SUCCESS)
-	{
-		printer::inst()->print_msg(L1, "Error %s when calling clEnqueueWriteBuffer to fill input buffer.", err_to_str(ret));
-		return ERR_OCL_API;
-	}
-
-	if((ret = clSetKernelArg(Kernels[0], 0, sizeof(cl_mem), &ctx->InputBuffer)) != CL_SUCCESS)
-	{
-		printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel 0, argument 0.", err_to_str(ret));
-		return ERR_OCL_API;
-	}
-
-	// Scratchpads
-	if((ret = clSetKernelArg(Kernels[0], 1, sizeof(cl_mem), ctx->ExtraBuffers + 0)) != CL_SUCCESS)
-	{
-		printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel 0, argument 1.", err_to_str(ret));
-		return ERR_OCL_API;
-	}
-
-	// States
-	if((ret = clSetKernelArg(Kernels[0], 2, sizeof(cl_mem), ctx->ExtraBuffers + 1)) != CL_SUCCESS)
-	{
-		printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel 0, argument 2.", err_to_str(ret));
-		return ERR_OCL_API;
-	}
-
-	// Threads
-	if((ret = clSetKernelArg(Kernels[0], 3, sizeof(cl_uint), &numThreads)) != CL_SUCCESS)
-	{
-		printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel 0, argument 3.", err_to_str(ret));
-		return (ERR_OCL_API);
-	}
-
-	if(miner_algo == cryptonight_gpu)
-	{
-		// we use an additional cn0 kernel to prepare the scratchpad
-		// Scratchpads
-		if((ret = clSetKernelArg(Kernels[7], 0, sizeof(cl_mem), ctx->ExtraBuffers + 0)) != CL_SUCCESS)
-		{
-			printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel 0, argument 1.", err_to_str(ret));
-			return ERR_OCL_API;
-		}
-
-		// States
-		if((ret = clSetKernelArg(Kernels[7], 1, sizeof(cl_mem), ctx->ExtraBuffers + 1)) != CL_SUCCESS)
-		{
-			printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel 0, argument 2.", err_to_str(ret));
-			return ERR_OCL_API;
-		}
-	}
-
-	// CN1 Kernel
-
-	if((miner_algo == cryptonight_r) || (miner_algo == cryptonight_r_wow))
-	{
-
-		uint32_t PRECOMPILATION_DEPTH = 1;
-		constexpr uint64_t height_chunk_size = 25;
-		uint64_t height_offset = (height / height_chunk_size) * height_chunk_size;
-
-		// Get new kernel
-		cl_program program = xmrstak::amd::CryptonightR_get_program(ctx, miner_algo, height_offset, height_chunk_size, PRECOMPILATION_DEPTH);
-
-		if(program != ctx->ProgramCryptonightR || ctx->last_block_height != height)
-		{
-			cl_int ret;
-			std::string kernel_name = "cn1_cryptonight_r_" + std::to_string(height);
-			cl_kernel kernel = clCreateKernel(program, kernel_name.c_str(), &ret);
-
-			if(ret != CL_SUCCESS)
-			{
-				printer::inst()->print_msg(LDEBUG, "CryptonightR: clCreateKernel returned error %s", err_to_str(ret));
-			}
-			else
-			{
-				cl_kernel old_kernel = Kernels[1];
-				if(old_kernel)
-					clReleaseKernel(old_kernel);
-				Kernels[1] = kernel;
-			}
-			ctx->ProgramCryptonightR = program;
-			ctx->last_block_height = height;
-			printer::inst()->print_msg(LDEBUG, "Set height %llu", height);
-
-			// Precompile next program in background
-			for(int i = 1; i <= PRECOMPILATION_DEPTH; ++i)
-				xmrstak::amd::CryptonightR_get_program(ctx, miner_algo, height_offset + i * height_chunk_size, height_chunk_size, PRECOMPILATION_DEPTH, true);
-
-			printer::inst()->print_msg(LDEBUG, "Thread #%zu updated CryptonightR", ctx->deviceIdx);
-		}
-		else
-		{
-			printer::inst()->print_msg(LDEBUG, "Thread #%zu found CryptonightR", ctx->deviceIdx);
-		}
-	}
-
-	// Scratchpads
-	if((ret = clSetKernelArg(Kernels[1], 0, sizeof(cl_mem), ctx->ExtraBuffers + 0)) != CL_SUCCESS)
-	{
-		printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel 1, argument 0.", err_to_str(ret));
-		return ERR_OCL_API;
-	}
-
-	// States
-	if((ret = clSetKernelArg(Kernels[1], 1, sizeof(cl_mem), ctx->ExtraBuffers + 1)) != CL_SUCCESS)
-	{
-		printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel 1, argument 1.", err_to_str(ret));
-		return ERR_OCL_API;
-	}
-
-	// Threads
-	if((ret = clSetKernelArg(Kernels[1], 2, sizeof(cl_uint), &numThreads)) != CL_SUCCESS)
-	{
-		printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel 1, argument 2.", err_to_str(ret));
-		return (ERR_OCL_API);
-	}
-
-	if(miner_algo == cryptonight_monero || miner_algo == cryptonight_aeon || miner_algo == cryptonight_ipbc || miner_algo == cryptonight_stellite || miner_algo == cryptonight_masari || miner_algo == cryptonight_bittube2)
-	{
-		// Input
-		if((ret = clSetKernelArg(Kernels[1], 3, sizeof(cl_mem), &ctx->InputBuffer)) != CL_SUCCESS)
-		{
-			printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel 1, argument 4(input buffer).", err_to_str(ret));
-			return ERR_OCL_API;
-		}
-	}
-
-	// CN3 Kernel
-	// Scratchpads
-	if((ret = clSetKernelArg(Kernels[2], 0, sizeof(cl_mem), ctx->ExtraBuffers + 0)) != CL_SUCCESS)
-	{
-		printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel 2, argument 0.", err_to_str(ret));
-		return ERR_OCL_API;
-	}
-
-	// States
-	if((ret = clSetKernelArg(Kernels[2], 1, sizeof(cl_mem), ctx->ExtraBuffers + 1)) != CL_SUCCESS)
-	{
-		printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel 2, argument 1.", err_to_str(ret));
-		return ERR_OCL_API;
-	}
-
-	if(miner_algo == cryptonight_gpu)
-	{
-		// Output
-		if((ret = clSetKernelArg(Kernels[2], 2, sizeof(cl_mem), &ctx->OutputBuffer)) != CL_SUCCESS)
-		{
-			printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel %d, argument %d.", err_to_str(ret), 2, 2);
-			return ERR_OCL_API;
-		}
-
-		// Target
-		if((ret = clSetKernelArg(Kernels[2], 3, sizeof(cl_ulong), &target)) != CL_SUCCESS)
-		{
-			printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel %d, argument %d.", err_to_str(ret), 2, 3);
-			return ERR_OCL_API;
-		}
-
-		// Threads
-		if((ret = clSetKernelArg(Kernels[2], 4, sizeof(cl_uint), &numThreads)) != CL_SUCCESS)
-		{
-			printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel 2, argument 4.", err_to_str(ret));
-			return (ERR_OCL_API);
-		}
-	}
-	else
-	{
-		// Branch 0
-		if((ret = clSetKernelArg(Kernels[2], 2, sizeof(cl_mem), ctx->ExtraBuffers + 2)) != CL_SUCCESS)
-		{
-			printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel 2, argument 2.", err_to_str(ret));
-			return ERR_OCL_API;
-		}
-
-		// Branch 1
-		if((ret = clSetKernelArg(Kernels[2], 3, sizeof(cl_mem), ctx->ExtraBuffers + 3)) != CL_SUCCESS)
-		{
-			printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel 2, argument 3.", err_to_str(ret));
-			return ERR_OCL_API;
-		}
-
-		// Branch 2
-		if((ret = clSetKernelArg(Kernels[2], 4, sizeof(cl_mem), ctx->ExtraBuffers + 4)) != CL_SUCCESS)
-		{
-			printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel 2, argument 4.", err_to_str(ret));
-			return ERR_OCL_API;
-		}
-
-		// Branch 3
-		if((ret = clSetKernelArg(Kernels[2], 5, sizeof(cl_mem), ctx->ExtraBuffers + 5)) != CL_SUCCESS)
-		{
-			printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel 2, argument 5.", err_to_str(ret));
-			return ERR_OCL_API;
-		}
-
-		// Threads
-		if((ret = clSetKernelArg(Kernels[2], 6, sizeof(cl_uint), &numThreads)) != CL_SUCCESS)
-		{
-			printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel 2, argument 6.", err_to_str(ret));
-			return (ERR_OCL_API);
-		}
-
-		for(int i = 0; i < 4; ++i)
-		{
-			// States
-			if((ret = clSetKernelArg(Kernels[i + 3], 0, sizeof(cl_mem), ctx->ExtraBuffers + 1)) != CL_SUCCESS)
-			{
-				printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel %d, argument %d.", err_to_str(ret), i + 3, 0);
-				return ERR_OCL_API;
-			}
-
-			// Nonce buffer
-			if((ret = clSetKernelArg(Kernels[i + 3], 1, sizeof(cl_mem), ctx->ExtraBuffers + (i + 2))) != CL_SUCCESS)
-			{
-				printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel %d, argument %d.", err_to_str(ret), i + 3, 1);
-				return ERR_OCL_API;
-			}
-
-			// Output
-			if((ret = clSetKernelArg(Kernels[i + 3], 2, sizeof(cl_mem), &ctx->OutputBuffer)) != CL_SUCCESS)
-			{
-				printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel %d, argument %d.", err_to_str(ret), i + 3, 2);
-				return ERR_OCL_API;
-			}
-
-			// Target
-			if((ret = clSetKernelArg(Kernels[i + 3], 3, sizeof(cl_ulong), &target)) != CL_SUCCESS)
-			{
-				printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel %d, argument %d.", err_to_str(ret), i + 3, 3);
-				return ERR_OCL_API;
-			}
-
-			if((clSetKernelArg(Kernels[i + 3], 4, sizeof(cl_uint), &numThreads)) != CL_SUCCESS)
-			{
-				printer::inst()->print_msg(L1, "Error %s when calling clSetKernelArg for kernel %d, argument %d.", err_to_str(ret), i + 3, 4);
-				return (ERR_OCL_API);
-			}
-		}
-	}
-
-	return ERR_SUCCESS;
-}
 
 uint64_t updateTimings(GpuContext* ctx, const uint64_t t)
 {
@@ -1169,7 +1316,7 @@ uint64_t interleaveAdjustDelay(GpuContext* ctx, const bool enableAutoAdjustment)
 			{
 				if(ctx->lastDelay == delay && delay > maxDelay)
 					ctx->interleaveData->adjustThreshold -= 0.001;
-				// if the delay doubled than increase the adjustThreshold
+				// ifthe delay doubled than increase the adjustThreshold
 				else if(delay > 1 && ctx->lastDelay * 2 < delay)
 					ctx->interleaveData->adjustThreshold += 0.001;
 			}
@@ -1191,7 +1338,7 @@ uint64_t interleaveAdjustDelay(GpuContext* ctx, const bool enableAutoAdjustment)
 		g.unlock();
 		if(delay > 0)
 		{
-			// do not notify the user anymore if we reach a good delay
+			// do not notify the user anymore ifwe reach a good delay
 			if(delay > maxDelay)
 				printer::inst()->print_msg(L1, "OpenCL Interleave %u|%u: %u/%.2lf ms - %.1lf",
 					ctx->deviceIdx,
@@ -1207,110 +1354,261 @@ uint64_t interleaveAdjustDelay(GpuContext* ctx, const bool enableAutoAdjustment)
 	return t0;
 }
 
-size_t XMRRunJob(GpuContext* ctx, cl_uint* HashOutput, const xmrstak_algo& miner_algo)
+size_t RXSetJob(GpuContext *ctx, uint8_t *input, size_t input_len, uint64_t target, const uint8_t* seed_hash, const xmrstak_algo& miner_algo)
 {
-	const auto& Kernels = ctx->Kernels[miner_algo.Id()];
-
 	cl_int ret;
-	cl_uint zero = 0;
-	size_t BranchNonces[4];
-	memset(BranchNonces, 0, sizeof(size_t) * 4);
+	void* dataset = getRandomXDataset();
+	const size_t dataset_size = getRandomXDatasetSize();
 
-	size_t g_intensity = ctx->rawIntensity;
-	size_t w_size = ctx->workSize;
-	size_t g_thd = g_intensity;
-
-	if(ctx->compMode)
+	if((memcmp(ctx->rx_dataset_seedhash, seed_hash, sizeof(ctx->rx_dataset_seedhash)) != 0))
 	{
-		// round up to next multiple of w_size
-		g_thd = ((g_intensity + w_size - 1u) / w_size) * w_size;
-		// number of global threads must be a multiple of the work group size (w_size)
-		assert(g_thd % w_size == 0);
-	}
-
-	for(int i = 2; i < 6; ++i)
-	{
-		if((ret = clEnqueueWriteBuffer(ctx->CommandQueues, ctx->ExtraBuffers[i], CL_FALSE, sizeof(cl_uint) * g_intensity, sizeof(cl_uint), &zero, 0, NULL, NULL)) != CL_SUCCESS)
+		memcpy(ctx->rx_dataset_seedhash, seed_hash, sizeof(ctx->rx_dataset_seedhash));
+		//ctx->rx_variant = variant;
+		if(!ctx->datasetHost)
 		{
-			printer::inst()->print_msg(L1, "Error %s when calling clEnqueueWriteBuffer to zero branch buffer counter %d.", err_to_str(ret), i - 2);
-			return ERR_OCL_API;
-		}
-	}
-
-	if((ret = clEnqueueWriteBuffer(ctx->CommandQueues, ctx->OutputBuffer, CL_FALSE, sizeof(cl_uint) * 0xFF, sizeof(cl_uint), &zero, 0, NULL, NULL)) != CL_SUCCESS)
-	{
-		printer::inst()->print_msg(L1, "Error %s when calling clEnqueueWriteBuffer to fetch results.", err_to_str(ret));
-		return ERR_OCL_API;
-	}
-
-	size_t Nonce[2] = {ctx->Nonce, 1}, gthreads[2] = {g_thd, 8}, lthreads[2] = {8, 8};
-	if((ret = clEnqueueNDRangeKernel(ctx->CommandQueues, Kernels[0], 2, Nonce, gthreads, lthreads, 0, NULL, NULL)) != CL_SUCCESS)
-	{
-		printer::inst()->print_msg(L1, "Error %s when calling clEnqueueNDRangeKernel for kernel %d.", err_to_str(ret), 0);
-		return ERR_OCL_API;
-	}
-
-	size_t tmpNonce = ctx->Nonce;
-
-	if(miner_algo == cryptonight_gpu)
-	{
-		size_t thd = 64;
-		size_t intens = g_intensity * thd;
-		if((ret = clEnqueueNDRangeKernel(ctx->CommandQueues, Kernels[7], 1, 0, &intens, &thd, 0, NULL, NULL)) != CL_SUCCESS)
-		{
-			printer::inst()->print_msg(L1, "Error %s when calling clEnqueueNDRangeKernel for kernel %d.", err_to_str(ret), 7);
-			return ERR_OCL_API;
-		}
-
-		size_t w_size_cn_gpu = w_size * 16;
-		size_t g_thd_cn_gpu = g_thd * 16;
-
-		if((ret = clEnqueueNDRangeKernel(ctx->CommandQueues, Kernels[1], 1, 0, &g_thd_cn_gpu, &w_size_cn_gpu, 0, NULL, NULL)) != CL_SUCCESS)
-		{
-			printer::inst()->print_msg(L1, "Error %s when calling clEnqueueNDRangeKernel for kernel %d.", err_to_str(ret), 1);
-			return ERR_OCL_API;
-		}
-	}
-	else
-	{
-		if((ret = clEnqueueNDRangeKernel(ctx->CommandQueues, Kernels[1], 1, &tmpNonce, &g_thd, &w_size, 0, NULL, NULL)) != CL_SUCCESS)
-		{
-			printer::inst()->print_msg(L1, "Error %s when calling clEnqueueNDRangeKernel for kernel %d.", err_to_str(ret), 1);
-			return ERR_OCL_API;
-		}
-	}
-
-	size_t  NonceT[2] = {0, ctx->Nonce}, gthreadsT[2] = {8, g_thd}, lthreadsT[2] = {8 , w_size};
-	if((ret = clEnqueueNDRangeKernel(ctx->CommandQueues, Kernels[2], 2, NonceT, gthreadsT, lthreadsT, 0, NULL, NULL)) != CL_SUCCESS)
-	{
-		printer::inst()->print_msg(L1, "Error %s when calling clEnqueueNDRangeKernel for kernel %d.", err_to_str(ret), 2);
-			return ERR_OCL_API;
-	}
-
-	if(miner_algo != cryptonight_gpu)
-	{
-		for(int i = 0; i < 4; ++i)
-		{
-			if((ret = clEnqueueNDRangeKernel(ctx->CommandQueues, Kernels[i + 3], 1, &tmpNonce, &g_thd, &w_size, 0, NULL, NULL)) != CL_SUCCESS)
+			if((ret = clEnqueueWriteBuffer(ctx->CommandQueues, ctx->rx_dataset[ctx->deviceIdx], CL_TRUE, 0, dataset_size, dataset, 0, nullptr, nullptr)) != CL_SUCCESS)
 			{
-				printer::inst()->print_msg(L1, "Error %s when calling clEnqueueNDRangeKernel for kernel %d.", err_to_str(ret), i + 3);
+				printer::inst()->print_msg(L1,"Error %s when calling clEnqueueWriteBuffer to fill RandomX dataset.", err_to_str(ret));
 				return ERR_OCL_API;
 			}
 		}
 	}
 
-	// this call is blocking therefore the access to the results without cl_finish is fine
-	if((ret = clEnqueueReadBuffer(ctx->CommandQueues, ctx->OutputBuffer, CL_TRUE, 0, sizeof(cl_uint) * 0x100, HashOutput, 0, NULL, NULL)) != CL_SUCCESS)
+	if(input_len < 128)
 	{
-		printer::inst()->print_msg(L1, "Error %s when calling clEnqueueReadBuffer to fetch results.", err_to_str(ret));
+		memset(input + input_len, 0, 128 - input_len);
+	}
+
+	if((ret = clEnqueueWriteBuffer(ctx->CommandQueues, ctx->InputBuffer, CL_TRUE, 0, 128, input, 0, nullptr, nullptr)) != CL_SUCCESS)
+	{
+		printer::inst()->print_msg(L1,"Error %s when calling clEnqueueWriteBuffer to fill input buffer.", err_to_str(ret));
 		return ERR_OCL_API;
 	}
 
-	auto& numHashValues = HashOutput[0xFF];
+	const uint32_t blockTemplateSize = static_cast<uint32_t>(input_len);
+	if((ret = clSetKernelArg(ctx->rx_kernels[3], 2, sizeof(uint32_t), &blockTemplateSize)) != CL_SUCCESS)
+	{
+		printer::inst()->print_msg(L1,"clSetKernelArg fail %s %i %i", err_to_str(ret), 3, 2);
+		return ERR_OCL_API;
+	}
+
+	if((ret = clSetKernelArg(ctx->rx_kernels[8], 1, sizeof(uint64_t), &target)) != CL_SUCCESS)
+	{
+		printer::inst()->print_msg(L1,"clSetKernelArg fail %s %i %i", err_to_str(ret), 8, 1);
+		return ERR_OCL_API;
+	}
+
+	return ERR_SUCCESS;
+}
+
+size_t RXRunJob(GpuContext *ctx, cl_uint *HashOutput, const xmrstak_algo& miner_algo)
+{
+	const uint32_t g_intensity = static_cast<uint32_t>(ctx->rawIntensity);
+
+	cl_int ret;
+	if((ret = clSetKernelArg(ctx->rx_kernels[3], 3, sizeof(uint32_t), &ctx->Nonce)) != CL_SUCCESS)
+	{
+		printer::inst()->print_msg(L1,"clSetKernelArg fail %s %i %i", err_to_str(ret), 3, 3);
+		return ERR_OCL_API;
+	}
+
+	if((ret = clSetKernelArg(ctx->rx_kernels[8], 2, sizeof(uint32_t), &ctx->Nonce)) != CL_SUCCESS)
+	{
+		printer::inst()->print_msg(L1,"clSetKernelArg fail %s %i %i", err_to_str(ret), 8, 2);
+		return ERR_OCL_API;
+	}
+
+	size_t globalWorkSize = g_intensity;
+	size_t globalWorkSize4 = g_intensity * 4;
+	size_t globalWorkSize8 = g_intensity * 8;
+	size_t globalWorkSize16 = g_intensity * 16;
+	size_t globalWorkSize32 = g_intensity * 32;
+	size_t globalWorkSize64 = g_intensity * 64;
+	size_t localWorkSize = 64;
+	size_t localWorkSize32 = 32;
+	size_t localWorkSize16 = 16;
+
+	uint32_t zero = 0;
+	if((ret = clEnqueueWriteBuffer(ctx->CommandQueues, ctx->OutputBuffer, CL_FALSE, sizeof(cl_uint) * 0xFF, sizeof(uint32_t), &zero, 0, nullptr, nullptr)) != CL_SUCCESS)
+	{
+		printer::inst()->print_msg(L1,"Error %s when calling clEnqueueWriteBuffer to fetch results.", err_to_str(ret));
+		return ERR_OCL_API;
+	}
+
+	// blake2b_initial_hash
+	if((ret = clEnqueueNDRangeKernel(ctx->CommandQueues, ctx->rx_kernels[3], 1, nullptr, &globalWorkSize, &localWorkSize, 0, nullptr, nullptr)) != CL_SUCCESS)
+	{
+		printer::inst()->print_msg(L1,"Error %s when calling clEnqueueNDRangeKernel for kernel %d.", err_to_str(ret), 3);
+		return ERR_OCL_API;
+	}
+
+	// fillAes1Rx4_scratchpad
+	if((ret = clEnqueueNDRangeKernel(ctx->CommandQueues, ctx->rx_kernels[0], 1, nullptr, &globalWorkSize4, &localWorkSize, 0, nullptr, nullptr)) != CL_SUCCESS)
+	{
+		printer::inst()->print_msg(L1,"Error %s when calling clEnqueueNDRangeKernel for kernel %d.", err_to_str(ret), 0);
+		return ERR_OCL_API;
+	}
+
+	uint32_t bfactor = static_cast<uint32_t>(ctx->bfactor);
+	if(bfactor > 8)
+	{
+		bfactor = 8;
+	}
+
+	for(uint32_t i = 0; i < RandomX_CurrentConfig.ProgramCount; ++i)
+	{
+		// fillAes4Rx4_entropy
+		if((ret = clEnqueueNDRangeKernel(ctx->CommandQueues, ctx->rx_kernels[1], 1, nullptr, &globalWorkSize4, &localWorkSize, 0, nullptr, nullptr)) != CL_SUCCESS)
+		{
+			printer::inst()->print_msg(L1,"Error %s when calling clEnqueueNDRangeKernel for kernel %d.", err_to_str(ret), 1);
+			return ERR_OCL_API;
+		}
+
+		if(!ctx->gcnAsm)
+		{
+			// init_vm
+			if((ret = clSetKernelArg(ctx->rx_kernels[6], 3, sizeof(uint32_t), &i)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1,"clSetKernelArg fail %s %i %i", err_to_str(ret), 6, 3);
+				return ERR_OCL_API;
+			}
+
+			if((ret = clEnqueueNDRangeKernel(ctx->CommandQueues, ctx->rx_kernels[6], 1, nullptr, &globalWorkSize8, &localWorkSize32, 0, nullptr, nullptr)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1,"Error %s when calling clEnqueueNDRangeKernel for kernel %d.", err_to_str(ret), 6);
+				return ERR_OCL_API;
+			}
+
+			// execute_vm
+			uint32_t num_iterations = RandomX_CurrentConfig.ProgramIterations >> bfactor;
+			uint32_t first = 1;
+			uint32_t last = 0;
+
+			if((ret = clSetKernelArg(ctx->rx_kernels[7], 5, sizeof(uint32_t), &num_iterations)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1,"clSetKernelArg fail %s %i %i", err_to_str(ret), 7, 5);
+				return ERR_OCL_API;
+			}
+
+			if((ret = clSetKernelArg(ctx->rx_kernels[7], 6, sizeof(uint32_t), &first)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1,"clSetKernelArg fail %s %i %i", err_to_str(ret), 7, 6);
+				return ERR_OCL_API;
+			}
+
+			if((ret = clSetKernelArg(ctx->rx_kernels[7], 7, sizeof(uint32_t), &last)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1,"clSetKernelArg fail %s %i %i", err_to_str(ret), 7, 7);
+				return ERR_OCL_API;
+			}
+
+			for(int j = 0, n = 1 << bfactor; j < n; ++j)
+			{
+				if(j == n - 1)
+				{
+					last = 1;
+					if((ret = clSetKernelArg(ctx->rx_kernels[7], 7, sizeof(uint32_t), &last)) != CL_SUCCESS)
+					{
+						printer::inst()->print_msg(L1,"clSetKernelArg fail %s %i %i", err_to_str(ret), 7, 7);
+						return ERR_OCL_API;
+					}
+				}
+
+				// execute_vm
+				if((ret = clEnqueueNDRangeKernel(ctx->CommandQueues, ctx->rx_kernels[7], 1, nullptr, (ctx->workSize == 16) ? &globalWorkSize16 : &globalWorkSize8, (ctx->workSize == 16) ? &localWorkSize32 : &localWorkSize16, 0, nullptr, nullptr)) != CL_SUCCESS)
+				{
+					printer::inst()->print_msg(L1,"Error %s when calling clEnqueueNDRangeKernel for kernel %d.", err_to_str(ret), 7);
+					return ERR_OCL_API;
+				}
+
+				if(j == 0)
+				{
+					first = 0;
+					if((ret = clSetKernelArg(ctx->rx_kernels[7], 6, sizeof(uint32_t), &first)) != CL_SUCCESS)
+					{
+						printer::inst()->print_msg(L1,"clSetKernelArg fail %s %i %i", err_to_str(ret), 7, 6);
+						return ERR_OCL_API;
+					}
+				}
+			}
+		}
+		else {
+			// randomx_jit
+			if((ret = clSetKernelArg(ctx->rx_kernels[9], 6, sizeof(uint32_t), &i)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1,"clSetKernelArg fail %s %i %i", err_to_str(ret), 9, 6);
+				return ERR_OCL_API;
+			}
+
+			if((ret = clEnqueueNDRangeKernel(ctx->CommandQueues, ctx->rx_kernels[9], 1, nullptr, &globalWorkSize32, &localWorkSize, 0, nullptr, nullptr)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1,"Error %s when calling clEnqueueNDRangeKernel for kernel %d.", err_to_str(ret), 9);
+				return ERR_OCL_API;
+			}
+
+			if((ret = clFinish(ctx->CommandQueues)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1,"Error %s when calling clFinish.", err_to_str(ret));
+				return ERR_OCL_API;
+			}
+
+			// randomx_run
+			if((ret = clEnqueueNDRangeKernel(ctx->CommandQueues, ctx->rx_kernels[10], 1, nullptr, &globalWorkSize64, &localWorkSize, 0, nullptr, nullptr)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1,"Error %s when calling clEnqueueNDRangeKernel for kernel %d.", err_to_str(ret), 10);
+				return ERR_OCL_API;
+			}
+		}
+
+		if(i == RandomX_CurrentConfig.ProgramCount - 1)
+		{
+			// hashAes1Rx4
+			if((ret = clEnqueueNDRangeKernel(ctx->CommandQueues, ctx->rx_kernels[2], 1, nullptr, &globalWorkSize4, &localWorkSize, 0, nullptr, nullptr)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1,"Error %s when calling clEnqueueNDRangeKernel for kernel %d.", err_to_str(ret), 2);
+				return ERR_OCL_API;
+			}
+
+			// blake2b_hash_registers_32
+			if((ret = clEnqueueNDRangeKernel(ctx->CommandQueues, ctx->rx_kernels[4], 1, nullptr, &globalWorkSize, &localWorkSize, 0, nullptr, nullptr)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1,"Error %s when calling clEnqueueNDRangeKernel for kernel %d.", err_to_str(ret), 4);
+				return ERR_OCL_API;
+			}
+		}
+		else
+		{
+			// blake2b_hash_registers_64
+			if((ret = clEnqueueNDRangeKernel(ctx->CommandQueues, ctx->rx_kernels[5], 1, nullptr, &globalWorkSize, &localWorkSize, 0, nullptr, nullptr)) != CL_SUCCESS)
+			{
+				printer::inst()->print_msg(L1,"Error %s when calling clEnqueueNDRangeKernel for kernel %d.", err_to_str(ret), 5);
+				return ERR_OCL_API;
+			}
+		}
+	}
+
+	if((ret = clEnqueueNDRangeKernel(ctx->CommandQueues, ctx->rx_kernels[8], 1, nullptr, &globalWorkSize, &localWorkSize, 0, nullptr, nullptr)) != CL_SUCCESS)
+	{
+		printer::inst()->print_msg(L1,"Error %s when calling clEnqueueNDRangeKernel for kernel %d.", err_to_str(ret), 8);
+		return ERR_OCL_API;
+	}
+
+	if(clEnqueueReadBuffer(ctx->CommandQueues, ctx->OutputBuffer, CL_FALSE, 0, sizeof(cl_uint) * 0x100, HashOutput, 0, nullptr, nullptr) != CL_SUCCESS)
+	{
+		return ERR_OCL_API;
+	}
+
+	clFinish(ctx->CommandQueues);
+
+	cl_uint& numHashValues = HashOutput[0xFF];
+
 	// avoid out of memory read, we have only storage for 0xFF results
 	if(numHashValues > 0xFF)
+	{
 		numHashValues = 0xFF;
-	ctx->Nonce += g_intensity;
+	}
+
+	ctx->Nonce += (uint32_t) g_intensity;
 
 	return ERR_SUCCESS;
 }

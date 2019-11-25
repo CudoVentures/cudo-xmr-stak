@@ -24,7 +24,6 @@
 #include "xmrstak/backend/backendConnector.hpp"
 #include "xmrstak/backend/globalStates.hpp"
 #include "xmrstak/backend/miner_work.hpp"
-#include "xmrstak/donate-level.hpp"
 #include "xmrstak/jconf.hpp"
 #include "xmrstak/misc/configEditor.hpp"
 #include "xmrstak/misc/console.hpp"
@@ -71,6 +70,7 @@ void help()
 #ifdef _WIN32
 	cout << "  --noUAC                    disable the UAC dialog" << endl;
 #endif
+	cout << "  --noTest                   disable the startup POW self test" << endl;
 	cout << "  --benchmark BLOCKVERSION   ONLY do a benchmark and exit" << endl;
 	cout << "  --benchwait WAIT_SEC             ... benchmark wait time" << endl;
 	cout << "  --benchwork WORK_SEC             ... benchmark work time" << endl;
@@ -512,6 +512,10 @@ int main(int argc, char* argv[])
 		{
 			params::inst().useNVIDIA = false;
 		}
+		else if(opName.compare("--noTest") == 0)
+		{
+			params::inst().selfTest = false;
+		}
 		else if (opName.compare("--nvidiaGpus") == 0)
 		{
 			++i;
@@ -834,11 +838,14 @@ int main(int argc, char* argv[])
 	if(strlen(jconf::inst()->GetOutputFile()) != 0)
 		printer::inst()->open_logfile(jconf::inst()->GetOutputFile());
 
-	if(!BackendConnector::self_test())
+	if(params::inst().selfTest)
 	{
-		printer::inst()->print_msg(L0, "Self test not passed!");
-		win_exit();
-		return 1;
+		if(!BackendConnector::self_test())
+		{
+			printer::inst()->print_msg(L0, "Self test not passed!");
+			win_exit();
+			return 1;
+		}
 	}
 
 	if(jconf::inst()->GetHttpdPort() != uint16_t(params::httpd_port_disabled))
@@ -860,23 +867,19 @@ int main(int argc, char* argv[])
 	printer::inst()->print_str(get_version_str_short().c_str());
 	printer::inst()->print_str("\n\n");
 	printer::inst()->print_str("Brought to you by fireice_uk and psychocrypt under GPLv3.\n");
-	printer::inst()->print_str("Based on CPU mining code by wolf9466 (heavily optimized by fireice_uk).\n");
+	printer::inst()->print_str("Based on CPU mining code by tevador and SChernykh.\n");
 #ifndef CONF_NO_CUDA
-	printer::inst()->print_str("Based on NVIDIA mining code by KlausT and psychocrypt.\n");
+	printer::inst()->print_str("Based on NVIDIA mining code by SChernykh.\n");
 #endif
 #ifndef CONF_NO_OPENCL
-	printer::inst()->print_str("Based on OpenCL mining code by wolf9466.\n");
+	printer::inst()->print_str("Based on OpenCL mining code by SChernykh.\n");
 #endif
-	char buffer[64];
-	snprintf(buffer, sizeof(buffer), "\nConfigurable dev donation level is set to %.1f%%\n\n", fDevDonationLevel * 100.0);
-	printer::inst()->print_str(buffer);
 	printer::inst()->print_str("-------------------------------------------------------------------\n");
 	printer::inst()->print_str("You can use following keys to display reports:\n");
 	printer::inst()->print_str("'h' - hashrate\n");
 	printer::inst()->print_str("'r' - results\n");
 	printer::inst()->print_str("'c' - connection\n");
 	printer::inst()->print_str("-------------------------------------------------------------------\n");
-	printer::inst()->print_str("Upcoming xmr-stak-gui is sponsored by:\n");
 	printer::inst()->print_str("   #####   ______               ____\n");
 	printer::inst()->print_str(" ##     ## | ___ \\             /  _ \\\n");
 	printer::inst()->print_str("#    _    #| |_/ /_   _   ___  | / \\/ _   _  _ _  _ _  ___  _ __    ___  _   _\n");
@@ -888,7 +891,7 @@ int main(int argc, char* argv[])
 	printer::inst()->print_str("This currency is a way for us to implement the ideas that we were unable to in\n");
 	printer::inst()->print_str("Monero. See https://github.com/fireice-uk/cryptonote-speedup-demo for details.\n");
 	printer::inst()->print_str("-------------------------------------------------------------------\n");
-	printer::inst()->print_msg(L0, "Mining coin: %s", ::jconf::inst()->GetCurrentCoinSelection().GetDescription(1).GetMiningAlgo().Name().c_str());
+	printer::inst()->print_msg(L0, "Mining coin: %s", ::jconf::inst()->GetCurrentCoinSelection().GetDescription().GetMiningAlgo().Name().c_str());
 
 	if(params::inst().benchmark_block_version >= 0)
 	{
@@ -914,6 +917,9 @@ int main(int argc, char* argv[])
 			break;
 		case 'c':
 			executor::inst()->push_event(ex_event(EV_USR_CONNSTAT));
+			break;
+		case 'v':
+			executor::inst()->push_event(ex_event(EV_MOTD_LINK));
 			break;
 		default:
 			break;
@@ -946,17 +952,37 @@ int do_benchmark(int block_version, int wait_sec, int work_sec)
 	xmrstak::miner_work oWork = xmrstak::miner_work();
 	pvThreads = xmrstak::BackendConnector::thread_starter(oWork);
 
+	std::array<uint8_t, 32> seed_hash = {0};
+	seed_hash[0] = 1u;
+
 	printer::inst()->print_msg(L0, "Wait %d sec until all backends are initialized", wait_sec);
 	std::this_thread::sleep_for(std::chrono::seconds(wait_sec));
 
+	// trigger dataset creation
+	xmrstak::globalStates::inst().switch_work(xmrstak::miner_work("", work, 128, 0, false, 0, 0, seed_hash), dat);
+	printer::inst()->print_msg(L0, "Wait %d sec to initialize the dataset", wait_sec);
+	std::this_thread::sleep_for(std::chrono::seconds(wait_sec));
+
+	// stop hashing
+	xmrstak::globalStates::inst().switch_work(xmrstak::miner_work(), dat);
+	printer::inst()->print_msg(L0, "Wait %d sec to end warmup", 2);
+	std::this_thread::sleep_for(std::chrono::seconds(2));
+
+	for(uint32_t i = 0; i < pvThreads->size(); i++)
+	{
+		pvThreads->at(i)->iHashCount = 0u;
+	}
 	/* AMD and NVIDIA is currently only supporting work sizes up to 128byte
 	 */
 	printer::inst()->print_msg(L0, "Start a %d second benchmark...", work_sec);
-	xmrstak::globalStates::inst().switch_work(xmrstak::miner_work("", work, 128, 0, false, 1, 0), dat);
+	xmrstak::globalStates::inst().switch_work(xmrstak::miner_work("", work, 128, 0, false, 0, 0, seed_hash), dat);
 	uint64_t iStartStamp = get_timestamp_ms();
 
 	std::this_thread::sleep_for(std::chrono::seconds(work_sec));
-	xmrstak::globalStates::inst().switch_work(xmrstak::miner_work("", work, 128, 0, false, 0, 0), dat);
+	// stop hashing
+	xmrstak::globalStates::inst().switch_work(xmrstak::miner_work(), dat);
+	printer::inst()->print_msg(L0, "Wait %d sec to collect benchmark data", 2);
+	std::this_thread::sleep_for(std::chrono::seconds(2));
 
 	double fTotalHps = 0.0;
 	for(uint32_t i = 0; i < pvThreads->size(); i++)
@@ -972,5 +998,6 @@ int do_benchmark(int block_version, int wait_sec, int work_sec)
 	}
 
 	printer::inst()->print_msg(L0, "Benchmark Total: %.1f H/S", fTotalHps);
+	printer::inst()->print_msg(L0, "Benchmark are measured without the dataset creation.");
 	return 0;
 }

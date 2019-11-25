@@ -97,7 +97,7 @@ struct jpsock::opq_json_val
 		val(val) {}
 };
 
-jpsock::jpsock(size_t id, const char* sAddr, const char* sLogin, const char* sRigId, const char* sPassword, double pool_weight, bool dev_pool, bool tls, const char* tls_fp, bool nicehash) :
+jpsock::jpsock(size_t id, const char* sAddr, const char* sLogin, const char* sRigId, const char* sPassword, double pool_weight, bool tls, const char* tls_fp, bool nicehash) :
 	net_addr(sAddr),
 	usr_login(sLogin),
 	usr_rigid(sRigId),
@@ -105,7 +105,6 @@ jpsock::jpsock(size_t id, const char* sAddr, const char* sLogin, const char* sRi
 	tls_fp(tls_fp),
 	pool_id(id),
 	pool_weight(pool_weight),
-	pool(dev_pool),
 	nicehash(nicehash),
 	connect_time(0),
 	connect_attempts(0),
@@ -417,12 +416,13 @@ bool jpsock::process_pool_job(const opq_json_val* params, const uint64_t message
 	if(!params->val->IsObject())
 		return set_socket_error("PARSE error: Job error 1");
 
-	const Value *blob, *jobid, *target, *motd, *blk_height;
+	const Value *blob, *jobid, *target, *motd, *blk_height, *seed_hash;
 	jobid = GetObjectMember(*params->val, "job_id");
 	blob = GetObjectMember(*params->val, "blob");
 	target = GetObjectMember(*params->val, "target");
 	motd = GetObjectMember(*params->val, "motd");
 	blk_height = GetObjectMember(*params->val, "height");
+	seed_hash = GetObjectMember(*params->val, "seed_hash");
 
 	if(jobid == nullptr || blob == nullptr || target == nullptr ||
 		!jobid->IsString() || !blob->IsString() || !target->IsString())
@@ -477,17 +477,19 @@ bool jpsock::process_pool_job(const opq_json_val* params, const uint64_t message
 		char sTempStr[] = "00000000"; // Little-endian CPU FTW
 		memcpy(sTempStr, target->GetString(), target_slen);
 		if(!hex2bin(sTempStr, 8, (unsigned char*)&iTempInt) || iTempInt == 0)
-			return set_socket_error("PARSE error: Invalid target");
+			return set_socket_error("PARSE error: Invalid target of length 8");
 
 		oPoolJob.iTarget = t32_to_t64(iTempInt);
 	}
 	else if(target_slen <= 16)
 	{
-		oPoolJob.iTarget = 0;
+		uint64_t iTempInt = 0ul;
 		char sTempStr[] = "0000000000000000";
 		memcpy(sTempStr, target->GetString(), target_slen);
-		if(!hex2bin(sTempStr, 16, (unsigned char*)&oPoolJob.iTarget) || oPoolJob.iTarget == 0)
-			return set_socket_error("PARSE error: Invalid target");
+		if(!hex2bin(sTempStr, 16, (unsigned char*)&iTempInt) || iTempInt == 0)
+			return set_socket_error("PARSE error: Invalid target of length 16");
+
+		oPoolJob.iTarget = iTempInt;
 	}
 	else
 		return set_socket_error("PARSE error: Job error 5");
@@ -497,6 +499,11 @@ bool jpsock::process_pool_job(const opq_json_val* params, const uint64_t message
 	if(blk_height != nullptr && blk_height->IsUint64())
 		oPoolJob.iBlockHeight = bswap_64(blk_height->GetUint64());
 
+	if(seed_hash != nullptr && seed_hash->IsString() && seed_hash->GetStringLength() == 64u)
+	{
+		printer::inst()->print_msg(LDEBUG,"randomX job seed %s", seed_hash->GetString());
+		hex2bin(seed_hash->GetString(), seed_hash->GetStringLength(), oPoolJob.seed_hash.data());
+	}
 	std::unique_lock<std::mutex> lck(job_mutex);
 	oCurrentJob = oPoolJob;
 	lck.unlock();

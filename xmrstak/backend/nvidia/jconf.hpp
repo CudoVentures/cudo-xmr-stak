@@ -28,10 +28,8 @@ class jconf
 		uint32_t bfactor;
 		uint32_t bsleep;
 		bool bDoubleMode;
-		bool bNoPrefetch;
 		int32_t cpu_aff;
 		int syncMode;
-		int memMode;
 
 		long long iCpuAff;
 	};

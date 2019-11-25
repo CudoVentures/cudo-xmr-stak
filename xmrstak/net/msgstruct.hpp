@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <string.h>
 #include <string>
+#include <array>
 
 // Structures that we use to pass info between threads constructors are here just to make
 // the stack allocation take up less space, heap is a shared resource that needs locks too of course
@@ -17,6 +18,7 @@ struct pool_job
 	uint32_t iWorkLen;
 	uint32_t iSavedNonce;
 	uint64_t iBlockHeight = uint64_t(-1);
+	std::array<uint8_t, 32> seed_hash = {{0}};
 
 	pool_job() :
 		iWorkLen(0),
@@ -105,7 +107,9 @@ enum ex_event_name
 	EV_HTML_HASHRATE,
 	EV_HTML_RESULTS,
 	EV_HTML_CONNSTAT,
-	EV_HTML_JSON
+	EV_HTML_JSON,
+	EV_SOCK_UPDATE_MOTD,
+	EV_MOTD_LINK
 };
 
 /*

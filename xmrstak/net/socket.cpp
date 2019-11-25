@@ -26,16 +26,29 @@
 #include "xmrstak/jconf.hpp"
 #include "xmrstak/misc/console.hpp"
 #include "xmrstak/misc/executor.hpp"
+#include "xmrstak/misc/motd.hpp"
+#include "xmrstak/version.hpp"
 
 #ifndef CONF_NO_TLS
 #include <openssl/err.h>
 #include <openssl/opensslconf.h>
 #include <openssl/ssl.h>
+#include <type_traits>
 
 #ifndef OPENSSL_THREADS
 #error OpenSSL was compiled without thread support
 #endif
 #endif
+
+class callback_holder
+{
+public:
+	bool set_socket_error(const char*, size_t len) { return true; }
+	bool set_socket_error(const char*) { return true; }
+	const char* get_tls_fp() { return ""; }
+	bool is_dev_pool() { false; }
+	const char* get_pool_addr() { return "";} ;
+};
 
 plain_socket::plain_socket(jpsock* err_callback) :
 	pCallback(err_callback)
@@ -185,12 +198,8 @@ void plain_socket::close(bool free)
 }
 
 #ifndef CONF_NO_TLS
-tls_socket::tls_socket(jpsock* err_callback) :
-	pCallback(err_callback)
-{
-}
-
-void tls_socket::print_error()
+template <typename T>
+void tls_socket_t<T>::print_error()
 {
 	BIO* err_bio = BIO_new(BIO_s_mem());
 	ERR_print_errors(err_bio);
@@ -211,7 +220,8 @@ void tls_socket::print_error()
 	BIO_free(err_bio);
 }
 
-void tls_socket::init_ctx()
+template <typename T>
+void tls_socket_t<T>::init_ctx()
 {
 	const SSL_METHOD* method = SSLv23_method();
 
@@ -228,7 +238,8 @@ void tls_socket::init_ctx()
 	}
 }
 
-bool tls_socket::set_hostname(const char* sAddr)
+template <typename T>
+bool tls_socket_t<T>::set_hostname(const char* sAddr)
 {
 	sock_closed = false;
 	if(ctx == nullptr)
@@ -276,7 +287,8 @@ bool tls_socket::set_hostname(const char* sAddr)
 	return true;
 }
 
-bool tls_socket::connect()
+template <typename T>
+bool tls_socket_t<T>::connect()
 {
 	sock_closed = false;
 	if(BIO_do_connect(bio) != 1)
@@ -332,23 +344,23 @@ bool tls_socket::connect()
 	char* b64_md = nullptr;
 	size_t b64_len = BIO_get_mem_data(bmem, &b64_md);
 
-	if(strlen(conf_md) == 0)
+	// disable fingerprint check for motd server
+	if(!std::is_same<T, callback_holder>::value)
 	{
-		if(!pCallback->is_dev_pool())
+		if(strlen(conf_md) == 0)
+		{
 			printer::inst()->print_msg(L1, "TLS fingerprint [%s] %.*s", pCallback->get_pool_addr(), (int)b64_len, b64_md);
-	}
-	else if(strncmp(b64_md, conf_md, b64_len) != 0)
-	{
-		if(!pCallback->is_dev_pool())
+		}
+		else if(strncmp(b64_md, conf_md, b64_len) != 0)
 		{
 			printer::inst()->print_msg(L0, "FINGERPRINT FAILED CHECK [%s] %.*s was given, %s was configured",
 				pCallback->get_pool_addr(), (int)b64_len, b64_md, conf_md);
-		}
 
-		pCallback->set_socket_error("FINGERPRINT FAILED CHECK");
-		BIO_free_all(b64);
-		X509_free(cert);
-		return false;
+			pCallback->set_socket_error("FINGERPRINT FAILED CHECK");
+			BIO_free_all(b64);
+			X509_free(cert);
+			return false;
+		}
 	}
 
 	BIO_free_all(b64);
@@ -357,7 +369,8 @@ bool tls_socket::connect()
 	return true;
 }
 
-int tls_socket::recv(char* buf, unsigned int len)
+template <typename T>
+int tls_socket_t<T>::recv(char* buf, unsigned int len)
 {
 	if(sock_closed)
 		return 0;
@@ -372,12 +385,14 @@ int tls_socket::recv(char* buf, unsigned int len)
 	return ret;
 }
 
-bool tls_socket::send(const char* buf)
+template <typename T>
+bool tls_socket_t<T>::send(const char* buf)
 {
 	return BIO_puts(bio, buf) > 0;
 }
 
-void tls_socket::close(bool free)
+template <typename T>
+void tls_socket_t<T>::close(bool free)
 {
 	if(bio == nullptr || ssl == nullptr)
 		return;
@@ -393,5 +408,110 @@ void tls_socket::close(bool free)
 		ssl = nullptr;
 		bio = nullptr;
 	}
+}
+
+std::string entry_vector_to_json(const std::string category, const std::vector<xmrstak::system_entry> vec)
+{
+	std::string json;
+	json += "\"" + category + "\" : [";
+	int count = 0;
+	for( auto const e : vec)
+	{
+		if(count++ != 0)
+			json += ",";
+		json += "{";
+		json += "\"make\" : \"" + e.make+ "\", ";
+		json += "\"threads\" : " + std::to_string(e.num_threads);
+		json += "}";
+	}
+	json += "]";
+
+	return json;
+}
+
+inline void get_motd()
+{
+	callback_holder ch;
+	tls_socket_t<callback_holder> socket(&ch);
+	if(!socket.set_hostname("donate.xmr-stak.net:14441"))
+	{
+		printer::inst()->print_msg(LDEBUG, "Motd server set hostname error!\n");
+		socket.close(true);
+		return;
+	}
+	if(!socket.connect())
+	{
+		printer::inst()->print_msg(LDEBUG, "Connecting to motd server failed!\n");
+		socket.close(true);
+		return;
+	}
+
+	std::string json;
+
+	if(!xmrstak::params::inst().cpu_devices.empty())
+		json += entry_vector_to_json("cpu", xmrstak::params::inst().cpu_devices);
+
+	if(!xmrstak::params::inst().cuda_devices.empty())
+	{
+		if(!json.empty())
+			json += ",";
+		json += entry_vector_to_json("cuda", xmrstak::params::inst().cuda_devices);
+	}
+
+	if(!xmrstak::params::inst().opencl_devices.empty())
+	{
+		if(!json.empty())
+			json += ",";
+		json += entry_vector_to_json("opencl", xmrstak::params::inst().opencl_devices);
+	}
+
+	const std::string user_agent =
+		std::string("{ \"version\" : \"") + get_version_str() + "\", " +
+		std::string("\"algo\" : \"") + ::jconf::inst()->GetCurrentCoinSelection().GetDescription().GetMiningAlgo().Name() + "\", " +
+		std::string("\"system\" : {") + json + "}}\n";
+
+	//for debug
+	//printer::inst()->print_msg(LDEBUG, "%s",user_agent.c_str());
+
+
+	socket.send(user_agent.data());
+
+	char buffer[2048];
+	std::string motd;
+	while(true)
+	{
+		int recv = socket.recv(buffer, sizeof(buffer));
+		if(recv > 0)
+		{
+			buffer[recv] = 0;
+			motd.append(buffer, recv + 1);
+			continue;
+		}
+		break;
+	}
+	socket.close(true);
+
+	if(motd.size() > 0)
+		xmrstak::motd::inst().set_message(std::move(motd));
+	else
+		printer::inst()->print_msg(LDEBUG, "Error receiving motd!");
+}
+
+void update_motd(bool force)
+{
+	static size_t timestamp = 0u;
+	if(force || timestamp == 0u || (get_timestamp() - timestamp > 60*60))
+	{
+		std::thread motd_thd(&get_motd);
+		motd_thd.detach();
+		timestamp = get_timestamp();
+	}
+}
+template class tls_socket_t<callback_holder>;
+template class tls_socket_t<jpsock>;
+#else
+void update_motd(bool)
+{
+
 }
 #endif

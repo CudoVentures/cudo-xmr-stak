@@ -79,7 +79,6 @@ minethd::minethd(miner_work& pWork, size_t iNo, const jconf::thd_cfg& cfg)
 	ctx.device_bfactor = (int)cfg.bfactor;
 	ctx.device_bsleep = (int)cfg.bsleep;
 	ctx.syncMode = cfg.syncMode;
-	ctx.memMode = cfg.memMode;
 	this->affinity = cfg.cpu_aff;
 
 	std::future<void> numa_guard = numa_promise.get_future();
@@ -123,7 +122,7 @@ std::vector<iBackend*>* minethd::thread_starter(uint32_t threadOffset, miner_wor
 {
 	std::vector<iBackend*>* pvThreads = new std::vector<iBackend*>();
 
-	auto miner_algo = ::jconf::inst()->GetCurrentCoinSelection().GetDescription(1).GetMiningAlgoRoot();
+	auto miner_algo = ::jconf::inst()->GetCurrentCoinSelection().GetDescription().GetMiningAlgoRoot();
 
 	if(!configEditor::file_exist(params::inst().configFileNVIDIA))
 	{
@@ -150,8 +149,6 @@ std::vector<iBackend*>* minethd::thread_starter(uint32_t threadOffset, miner_wor
 
 	size_t i, n = jconf::inst()->GetGPUThreadCount();
 	pvThreads->reserve(n);
-
-	cuInit(0);
 
 	jconf::thd_cfg cfg;
 	for(i = 0; i < n; i++)
@@ -203,10 +200,10 @@ void minethd::work_main()
 	cpu_ctx = cpu::minethd::minethd_alloc_ctx();
 
 	// start with root algorithm and switch later if fork version is reached
-	auto miner_algo = ::jconf::inst()->GetCurrentCoinSelection().GetDescription(1).GetMiningAlgoRoot();
+	auto miner_algo = ::jconf::inst()->GetCurrentCoinSelection().GetDescription().GetMiningAlgoRoot();
 
 	cpu::minethd::cn_on_new_job set_job;
-	cpu::minethd::func_multi_selector<1>(&cpu_ctx, set_job, ::jconf::inst()->HaveHardwareAes(), true /*bNoPrefetch*/, miner_algo);
+	cpu::minethd::func_multi_selector<1>(&cpu_ctx, set_job, ::jconf::inst()->HaveHardwareAes(), miner_algo);
 
 	uint32_t iNonce;
 
@@ -231,16 +228,16 @@ void minethd::work_main()
 		uint8_t new_version = oWork.getVersion();
 		if(new_version != version || oWork.iPoolId != lastPoolId)
 		{
-			coinDescription coinDesc = ::jconf::inst()->GetCurrentCoinSelection().GetDescription(oWork.iPoolId);
+			coinDescription coinDesc = ::jconf::inst()->GetCurrentCoinSelection().GetDescription();
 			if(new_version >= coinDesc.GetMiningForkVersion())
 			{
 				miner_algo = coinDesc.GetMiningAlgo();
-				cpu::minethd::func_multi_selector<1>(&cpu_ctx, set_job, ::jconf::inst()->HaveHardwareAes(), true /*bNoPrefetch*/, miner_algo);
+				cpu::minethd::func_multi_selector<1>(&cpu_ctx, set_job, ::jconf::inst()->HaveHardwareAes(), miner_algo);
 			}
 			else
 			{
 				miner_algo = coinDesc.GetMiningAlgoRoot();
-				cpu::minethd::func_multi_selector<1>(&cpu_ctx, set_job, ::jconf::inst()->HaveHardwareAes(), true /*bNoPrefetch*/, miner_algo);
+				cpu::minethd::func_multi_selector<1>(&cpu_ctx, set_job, ::jconf::inst()->HaveHardwareAes(), miner_algo);
 			}
 			lastPoolId = oWork.iPoolId;
 			version = new_version;
@@ -273,11 +270,32 @@ void minethd::work_main()
 			uint32_t foundNonce[10];
 			uint32_t foundCount;
 
-			cryptonight_extra_cpu_prepare(&ctx, iNonce, miner_algo);
+			if(ctx.d_scratchpads_size)
+			{
+				const uint32_t num_scratchpads = ctx.d_scratchpads_size / miner_algo.Mem();
+				if (h_per_round > num_scratchpads)
+				{
+					h_per_round = num_scratchpads;
+				}
+			}
+			h_per_round -= h_per_round % 32;
 
-			cryptonight_core_cpu_hash(&ctx, miner_algo, iNonce, cpu_ctx->cn_r_ctx.height);
+			randomx_prepare(&ctx, oWork.seed_hash.data(), miner_algo, h_per_round);
 
-			cryptonight_extra_cpu_final(&ctx, iNonce, oWork.iTarget, &foundCount, foundNonce, miner_algo);
+			if(miner_algo == randomX)
+			{
+				RandomX_Monero::hash(&ctx, iNonce, oWork.iTarget, &foundCount, foundNonce, h_per_round);
+			}
+			else if(miner_algo == randomX_wow)
+			{
+				RandomX_Wownero::hash(&ctx, iNonce, oWork.iTarget, &foundCount, foundNonce, h_per_round);
+			}
+			else if(miner_algo == randomX_loki)
+			{
+				RandomX_Loki::hash(&ctx, iNonce, oWork.iTarget, &foundCount, foundNonce, h_per_round);
+			}
+
+
 
 			for(size_t i = 0; i < foundCount; i++)
 			{

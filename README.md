@@ -1,9 +1,7 @@
 ###### fireice-uk's and psychocrypt's
-# XMR-Stak: Cryptonight All-in-One Mining Software
+# XMR-Stak-RX: Free RandomX Mining Software
 
-XMR-Stak is a universal open source stratum pool miner. This miner supports x86-64 CPUs, AMD and NVIDIA GPUs and can be used various crypto currencies: Ryo, Monero, Turtlecoin, Graft, Bittube, Loki, Aeon and many more Cryptonight coins.
-
-
+XMR-Stak-RX is a universal free and open source stratum pool miner. This miner supports x86-64 CPUs, AMD and NVIDIA GPUs and can be used for various randomX variants.
 
 ## Video guides
 [<img src="doc/_img/stak-yt-cover.jpg">](https://www.youtube.com/playlist?list=PLAhUkom29iGMFoN8pk91JA-oqvxlmJ5H8)
@@ -14,7 +12,7 @@ XMR-Stak is a universal open source stratum pool miner. This miner supports x86-
 * [Supported coins and algorithms](#supported-coins-and-algorithms)
 * [Download](#download)
 * [FAQ](doc/FAQ.md)
-* [Developer Donation](#default-developer-donation)
+* [Developer Donation](#developer-donation)
 * [Developer PGP Key's](doc/pgp_keys.md)
 
 ## Guides and FAQ
@@ -29,7 +27,7 @@ To improve our support we created [Xmr-Stak forum](https://www.reddit.com/r/XmrS
 
 - Supports all common backends (CPU/x86, AMD/NVIDIA GPU).
 - Supports all common OS (Linux, Windows and macOS).
-- Supports 15 cryptonight-variant mining algorithms + Cryptonight-GPU.
+- Supports `randomx`, `randomx_loki` and `randomx_wow`
 - Easy to use and flexible in setup:
   - guided start with easy/advanced setup option (no need to edit a config file for the first start)
   - auto-configuration and config file creation for each backend.
@@ -45,65 +43,33 @@ To improve our support we created [Xmr-Stak forum](https://www.reddit.com/r/XmrS
 
 Following coins can be mined using this miner:
 
-
-- [Aeon](http://www.aeon.cash)
-- [BitTube](https://coin.bit.tube/)
-- [Conceal](https://conceal.network)
-- [Graft](https://www.graft.network)
-- [Haven](https://havenprotocol.com)
-- [Lethean](https://lethean.io)
-- [Masari](https://getmasari.org)
+- [Loki]()
 - [Monero](https://getmonero.org)
-- [Plenteum](https://www.plenteum.com/)
-- [QRL](https://theqrl.org)
-- **[Ryo](https://ryo-currency.com) - Upcoming xmr-stak-gui is sponsored by Ryo Currency**
-- [Torque](https://torque.cash/)
-- [Zelerius](https://zelerius.org/)
+- [WOW]()
+
 
 **[Ryo Currency](https://ryo-currency.com)** - is a way for us to implement the ideas that we were unable to in
 Monero. See [here](https://github.com/fireice-uk/cryptonote-speedup-demo/) for details.
 
 If your preferred coin is not listed, you can choose one of the following mining algorithms:
-- 256Kib scratchpad memory
-    - cryptonight_turtle
-    
     
 - 1MiB scratchpad memory
-    - cryptonight_lite
-    - cryptonight_lite_v7
-    - cryptonight_lite_v7_xor (algorithm used by ipbc)
+    - randomx_wow
     
-    
-- 2MiB scratchpad memory
-    - cryptonight
-    - cryptonight_gpu (for Ryo's 14th of Feb fork)
-    - cryptonight_r
-    - cryptonight_masari (used in 2018)
-    - cryptonight_conceal
-    - cryptonight_v7
-    - cryptonight_v7_stellite
-    - cryptonight_v8
-    - cryptonight_v8_double (used by X-CASH)
-    - cryptonight_v8_half (used by masari and torque)
-    - cryptonight_v8_reversewaltz (used by graft)
-    - cryptonight_v8_zelerius
-    
-    
-- 4MiB scratchpad memory
-    - cryptonight_haven
-    - cryptonight_heavy
 
+- 2MiB scratchpad memory
+    - randomx
+    - randomx_loki
+    
 Please note, this list is not complete and is not an endorsement.
 
 ## Download
 
 You can find the latest releases and precompiled binaries on GitHub under [Releases](https://github.com/fireice-uk/xmr-stak/releases).
 
-## Default Developer Donation
+## Developer Donation
 
-By default, the miner will donate 2% of the hashpower (2 minutes in 100 minutes) to my pool. If you want to change that, edit [donate-level.hpp](xmrstak/donate-level.hpp) before you build the binaries.
-
-If you want to donate directly to support further development, here is my wallet
+If you want to donate directly to support further development, here are our wallets
 
 fireice-uk:
 ```

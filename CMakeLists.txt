@@ -1,11 +1,17 @@
 project(xmr-stak)
 
 cmake_minimum_required(VERSION 3.4.0)
+#   https://cmake.org/cmake/help/v3.12/policy/CMP0074.html
+if(POLICY CMP0074)
+    cmake_policy(SET CMP0074 NEW)
+endif()
 
 # enforce C++11
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_STANDARD 11)
+
+set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake")
 
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}" CACHE PATH "install prefix" FORCE)
@@ -67,52 +73,11 @@ option(CMAKE_LINK_STATIC "link as much as possible libraries static" OFF)
 
 option(CUDA_ENABLE "Enable or disable CUDA support (NVIDIA backend)" ON)
 if(CUDA_ENABLE)
-    find_package(CUDA 7.5)
+    find_package(CUDA 9.0)
 
     if(CUDA_FOUND)
-        # required for monero's cryptonight_r
-        # libcuda
-        find_library(CUDA_LIB
-        NAMES
-            libcuda
-            cuda
-            cuda.lib
-        HINTS
-            ${CUDA_TOOLKIT_ROOT_DIR}
-            ${LIBCUDA_LIBRARY_DIR}
-            ${CUDA_TOOLKIT_ROOT_DIR}
-            /usr
-            /usr/local/cuda
-        PATH_SUFFIXES
-            lib64
-            lib/x64
-            lib/Win32
-            lib64/stubs
-            lib)
-
-        #nvrtc
-        find_library(CUDA_NVRTC_LIB
-        NAMES
-            libnvrtc
-            nvrtc
-            nvrtc.lib
-        HINTS
-            ${CUDA_TOOLKIT_ROOT_DIR}
-            ${LIBNVRTC_LIBRARY_DIR}
-            ${CUDA_TOOLKIT_ROOT_DIR}
-            /usr
-            /usr/local/cuda
-        PATH_SUFFIXES
-            lib64
-            lib/x64
-            lib/Win32
-            lib)
 
         list(APPEND BACKEND_TYPES "nvidia")
-        option(XMR-STAK_LARGEGRID "Support large CUDA block count > 128" ON)
-        if(XMR-STAK_LARGEGRID)
-            add_definitions("-DXMR_STAK_LARGEGRID=${XMR-STAK_LARGEGRID}")
-        endif()
 
         set(DEVICE_COMPILER "nvcc")
         set(CUDA_COMPILER "${DEVICE_COMPILER}" CACHE STRING "Select the device compiler")
@@ -129,28 +94,23 @@ if(CUDA_ENABLE)
             add_definitions("-DXMR_STAK_THREADS=${XMR-STAK_THREADS}")
         endif()
         set(DEFAULT_CUDA_ARCH "30;35;37;50;52")
-        # Fermi GPUs are only supported with CUDA < 9.0
-        if(CUDA_VERSION VERSION_LESS 9.0)
-            list(APPEND DEFAULT_CUDA_ARCH "20")
-        endif()
+
         # add Pascal support for CUDA >= 8.0
-        if(NOT CUDA_VERSION VERSION_LESS 8.0)
-            list(APPEND DEFAULT_CUDA_ARCH "60" "61" "62")
-        endif()
+        list(APPEND DEFAULT_CUDA_ARCH "60" "61" "62")
+
         # add Volta support for CUDA >= 9.0
-        if(NOT CUDA_VERSION VERSION_LESS 9.0)
-            # Volta GPUs are currently not supported on MACOSX
-            # https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html#cuda-general-known-issues
-            if(NOT APPLE)
-                list(APPEND DEFAULT_CUDA_ARCH "70")
-            endif()
+        # Volta GPUs are currently not supported on MACOSX
+        # https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html#cuda-general-known-issues
+        if(NOT APPLE)
+            list(APPEND DEFAULT_CUDA_ARCH "70")
         endif()
+
         # add Turing support for CUDA >= 10.0
         if(NOT CUDA_VERSION VERSION_LESS 10.0)
             list(APPEND DEFAULT_CUDA_ARCH "75")
         endif()
 
-        set(CUDA_ARCH "${DEFAULT_CUDA_ARCH}" CACHE STRING "Set GPU architecture (semicolon separated list, e.g. '-DCUDA_ARCH=20;35;60')")
+        set(CUDA_ARCH "${DEFAULT_CUDA_ARCH}" CACHE STRING "Set GPU architecture (semicolon separated list, e.g. '-DCUDA_ARCH=35;60')")
 
         # generate comma separated list with architectures
         string(REPLACE ";" "+" STR_CUDA_ARCH "${CUDA_ARCH}")
@@ -197,18 +157,6 @@ if(CUDA_ENABLE)
                 set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -std=c++11")
             endif()
 
-            # required for cryptonight_gpu (fast floating point operations are not allowed)
-            set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} --fmad=false --prec-div=true --ftz=false")
-
-            # avoid that nvcc in CUDA 8 complains about sm_20 pending removal
-            if(CUDA_VERSION VERSION_EQUAL 8.0)
-                set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -Wno-deprecated-gpu-targets")
-            endif()
-
-            # avoid that nvcc in CUDA < 8 tries to use libc `memcpy` within the kernel
-            if(CUDA_VERSION VERSION_LESS 8.0)
-                add_definitions(-D_FORCE_INLINES)
-            endif()
             foreach(CUDA_ARCH_ELEM ${CUDA_ARCH})
                 # set flags to create device code for the given architecture
                 set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS}
@@ -425,6 +373,9 @@ else()
     add_definitions("-DCONF_NO_HWLOC")
 endif()
 
+include(cmake/randomx.cmake)
+include_directories(AFTER xmrstak/backend/cpu)
+
 ################################################################################
 # Windows Sockets
 ################################################################################
@@ -510,44 +461,6 @@ if(CMAKE_LINK_STATIC)
     endif()
 endif()
 
-if(CMAKE_C_COMPILER_ID MATCHES "MSVC")
-    # asm optimized monero v8 code
-    enable_language(ASM_MASM)
-    set_property(SOURCE "xmrstak/backend/cpu/crypto/asm/cryptonight_v8_main_loop.asm" PROPERTY ASM_MASM)
-    set_property(SOURCE "xmrstak/backend/cpu/crypto/asm/cnR/CryptonightR_template.asm" PROPERTY ASM_MASM)
-    add_library(xmr-stak-asm
-        STATIC
-        "xmrstak/backend/cpu/crypto/asm/cryptonight_v8_main_loop.asm"
-        "xmrstak/backend/cpu/crypto/asm/cnR/CryptonightR_template.asm"
-    )
-else()
-    # asm optimized monero v8 code
-    enable_language(ASM)
-    set_property(SOURCE "xmrstak/backend/cpu/crypto/asm/cryptonight_v8_main_loop.S" PROPERTY CPP)
-    set_property(SOURCE "xmrstak/backend/cpu/crypto/asm/cnR/CryptonightR_template.S" PROPERTY CPP)
-    set_source_files_properties("xmrstak/backend/cpu/crypto/asm/cryptonight_v8_main_loop.S" PROPERTIES COMPILE_FLAGS "-x assembler-with-cpp")
-    set_source_files_properties("xmrstak/backend/cpu/crypto/asm/cnR/CryptonightR_template.S" PROPERTIES COMPILE_FLAGS "-x assembler-with-cpp")
-    add_library(xmr-stak-asm
-        STATIC
-        "xmrstak/backend/cpu/crypto/asm/cryptonight_v8_main_loop.S"
-        "xmrstak/backend/cpu/crypto/asm/cnR/CryptonightR_template.S"
-    )
-endif()
-
-set_property(TARGET xmr-stak-asm PROPERTY LINKER_LANGUAGE C)
-
-# compile C files
-file(GLOB SRCFILES_C "xmrstak/backend/cpu/crypto/*.c")
-
-add_library(xmr-stak-c
-    STATIC
-    ${SRCFILES_C}
-)
-set_property(TARGET xmr-stak-c PROPERTY C_STANDARD 99)
-if(MICROHTTPD_ENABLE)
-    target_link_libraries(xmr-stak-c ${MHTD})
-endif()
-target_link_libraries(xmr-stak-c ${LIBS} xmr-stak-asm)
 
 # compile generic backend files
 file(GLOB BACKEND_CPP
@@ -563,12 +476,13 @@ add_library(xmr-stak-backend
     STATIC
     ${BACKEND_CPP}
 )
-target_link_libraries(xmr-stak-backend xmr-stak-c ${CMAKE_DL_LIBS} xmr-stak-asm)
+target_link_libraries(xmr-stak-backend xmr-stak-randomx ${CMAKE_DL_LIBS} ${RANDOMX_LIBRARIES} ${MHTD} ${LIBS})
 
 # compile CUDA backend
 if(CUDA_FOUND)
     file(GLOB CUDASRCFILES
         "xmrstak/backend/nvidia/nvcc_code/*.cu"
+        "xmrstak/backend/nvidia/RandomX*/*.cu"
         "xmrstak/backend/nvidia/*.cpp")
 
     if(CUDA_COMPILER STREQUAL "clang")
@@ -590,18 +504,10 @@ if(CUDA_FOUND)
         )
     endif()
 
-    set(CUDA_LIBRARIES ${CUDA_LIB} ${CUDA_LIBRARIES})
-    if(XMR-STAK_COMPILE STREQUAL "dev_release")
-        # do not link nvrtc for linux binaries, cn-r will be disabled
-        if(WIN32)
-            set(CUDA_LIBRARIES ${CUDA_LIBRARIES} ${CUDA_NVRTC_LIB})
-        endif()
-    else()
-        set(CUDA_LIBRARIES ${CUDA_LIBRARIES} ${CUDA_NVRTC_LIB})
-    endif()
+    set(CUDA_LIBRARIES ${CUDA_LIBRARIES})
 
     target_link_libraries(xmrstak_cuda_backend ${CUDA_LIBRARIES})
-    target_link_libraries(xmrstak_cuda_backend xmr-stak-backend xmr-stak-asm)
+    target_link_libraries(xmrstak_cuda_backend xmr-stak-backend)
 endif()
 
 # compile AMD backend
@@ -614,7 +520,7 @@ if(OpenCL_FOUND)
         ${OPENCLSRCFILES}
     )
     target_link_libraries(xmrstak_opencl_backend ${OpenCL_LIBRARY} )
-    target_link_libraries(xmrstak_opencl_backend xmr-stak-backend xmr-stak-asm)
+    target_link_libraries(xmrstak_opencl_backend xmr-stak-backend)
 endif()
 
 # compile final binary
@@ -622,15 +528,15 @@ file(GLOB SRCFILES_CPP "xmrstak/cli/*.cpp")
 set_source_files_properties(${SRCFILES_CPP} PROPERTIES LANGUAGE CXX)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
-    add_executable(xmr-stak ${SRCFILES_CPP} xmrstak/cli/xmr-stak.manifest)
+    add_executable(xmr-stak-rx ${SRCFILES_CPP} xmrstak/cli/xmr-stak.manifest)
 else()
-    add_executable(xmr-stak ${SRCFILES_CPP})
+    add_executable(xmr-stak-rx ${SRCFILES_CPP})
 endif()
 
 set(EXECUTABLE_OUTPUT_PATH "bin" CACHE STRING "Path to place executables relative to ${CMAKE_INSTALL_PREFIX}")
 set(LIBRARY_OUTPUT_PATH "bin" CACHE STRING "Path to place libraries relative to ${CMAKE_INSTALL_PREFIX}")
 
-target_link_libraries(xmr-stak ${LIBS} xmr-stak-c xmr-stak-backend xmr-stak-asm)
+target_link_libraries(xmr-stak-rx ${MHTD} ${LIBS} xmr-stak-backend)
 
 ################################################################################
 # Install
@@ -638,7 +544,7 @@ target_link_libraries(xmr-stak ${LIBS} xmr-stak-c xmr-stak-backend xmr-stak-asm)
 
 # do not install the binary if the project and install are equal
 if( NOT CMAKE_INSTALL_PREFIX STREQUAL PROJECT_BINARY_DIR )
-    install(TARGETS xmr-stak
+    install(TARGETS xmr-stak-rx
             RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}/${EXECUTABLE_OUTPUT_PATH}")
     if(CUDA_FOUND)
         if(WIN32)

@@ -3,7 +3,6 @@
 #include "telemetry.hpp"
 #include "thdq.hpp"
 #include "xmrstak/backend/iBackend.hpp"
-#include "xmrstak/donate-level.hpp"
 #include "xmrstak/misc/environment.hpp"
 #include "xmrstak/net/msgstruct.hpp"
 
@@ -32,7 +31,11 @@ class executor
 	{
 		auto& env = xmrstak::environment::inst();
 		if(env.pExecutor == nullptr)
-			env.pExecutor = new executor;
+		{
+			std::unique_lock<std::mutex> lck(env.update);
+			if(env.pExecutor == nullptr)
+				env.pExecutor = new executor;
+		}
 		return env.pExecutor;
 	};
 
@@ -54,25 +57,8 @@ class executor
 			ticks_left(ticks) {}
 	};
 
-	inline void set_timestamp() { dev_timestamp = get_timestamp(); };
-
 	// In milliseconds, has to divide a second (1000ms) into an integer number
 	constexpr static size_t iTickTime = 500;
-
-	// Dev donation time period in seconds. 100 minutes by default.
-	// We will divide up this period according to the config setting
-	constexpr static size_t iDevDonatePeriod = 100 * 60;
-
-	inline bool is_dev_time()
-	{
-		//Add 2 seconds to compensate for connect
-		constexpr size_t dev_portion = static_cast<size_t>(double(iDevDonatePeriod) * fDevDonationLevel + 2.);
-
-		if(dev_portion < 12) //No point in bothering with less than 10s
-			return false;
-
-		return (get_timestamp() - dev_timestamp) % iDevDonatePeriod >= (iDevDonatePeriod - dev_portion);
-	};
 
 	std::list<timed_event> lTimedEvents;
 	std::mutex timed_event_mutex;
@@ -82,8 +68,6 @@ class executor
 	std::vector<xmrstak::iBackend*>* pvThreads;
 
 	size_t current_pool_id = invalid_pool_id;
-	size_t last_usr_pool_id = invalid_pool_id;
-	size_t dev_timestamp;
 
 	std::list<jpsock> pools;
 
@@ -197,7 +181,7 @@ class executor
 	void on_pool_have_job(size_t pool_id, pool_job& oPoolJob);
 	void on_miner_result(size_t pool_id, job_result& oResult);
 	void connect_to_pools(std::list<jpsock*>& eval_pools);
-	bool get_live_pools(std::vector<jpsock*>& eval_pools, bool is_dev);
+	bool get_live_pools(std::vector<jpsock*>& eval_pools);
 	void eval_pool_choice();
 
 	inline size_t sec_to_ticks(size_t sec) { return sec * (1000 / iTickTime); }
