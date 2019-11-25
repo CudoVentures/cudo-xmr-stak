@@ -6,6 +6,7 @@ const fs = require('fs')
 
 const projectId = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || 'cudo-189019'
 const signPath = process.env.SIGN_PATH || process.argv[2]
+const platform = process.env.PLATFORM || process.argv[3]
 const bucketName = process.env.BUCKET_NAME || `${projectId}_cloudbuild`
 
 if (!signPath) {
@@ -23,7 +24,6 @@ const sign = async () => {
 
   // unique generate signing id
   const id = crypto.randomBytes(8).toString('hex')
-  const platform = 'win'
   console.log(`unique signing id ${id} generated`)
 
   // generate paths

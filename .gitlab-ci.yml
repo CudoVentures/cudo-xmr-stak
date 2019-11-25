@@ -99,8 +99,8 @@ upload:
     - yarn --ignore-scripts
   script:
     - "VERSION=$(grep -m1 version package.json | awk -F: '{ print $2 }' | sed 's/[\", ]//g')"
-    - node scripts/sign.js build-win/bin/Release/xmr-stak-rx.exe
-    - node scripts/sign.js build-mac/bin/xmr-stak-rx
+    - node scripts/sign.js build-win/bin/Release/xmr-stak-rx.exe win
+    - node scripts/sign.js build-mac/bin/xmr-stak-rx mac
     - tar -czvf win-$VERSION.tar.gz build-win/bin/Release/*.dll build-win/bin/Release/xmr-stak-rx.exe
     - tar -czvf linux-$VERSION.tar.gz build-linux/bin/xmr-stak-rx
     - tar -czvf mac-$VERSION.tar.gz build-mac/bin/xmr-stak-rx
