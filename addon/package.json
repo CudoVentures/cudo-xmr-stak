@@ -1,6 +1,6 @@
 {
   "name": "cudo-xmr-stak",
-  "version": "2.2.2",
+  "version": "1.0.0",
   "main": "bundle.js",
   "author": "Cudo Ventures",
   "scripts": {

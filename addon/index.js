@@ -1,4 +1,4 @@
-const { fork } = require('child_process')
+const { execFile } = require('child_process')
 const EventEmitter = require('events')
 const fs = require('fs')
 const path = require('path')
@@ -11,18 +11,21 @@ module.exports = () => {
   module.isRunning = false
   module.proc = null
 
+  // 20190327 11:24:44 NVML is disabled. You wont see GPUs stats.
+  // 20190327 11:16:23 [ OK ] 1/1 - 12.02 MH/s, 32ms
   module.parseLog = message => {
-    const parts = message.split('|')
-    const log = parts.slice(2).join(' ').trim()
+    const parts = message.toLowerCase().split(' ').filter(o => o)
+    const log = message.split(' ').slice(3).join(' ').trim()
 
-    if (parts[0] === 'ERR') {
-      return { type: 'error', error: log }
-    } else if (parts[0] === 'RES' && parts[2] === 'speed') {
-      const hashRate = parseFloat(parts[3] || 0) || 0
+    if (parts[0] === 'totals' && parts[1] === '(all):' && parts[2]) {
+      let hashRate = parseFloat(parts[2] || 0) || 0
       return { type: 'hashRate', hashRate }
-    } else {
-      return { type: 'log', message: log }
+    } if (parts[2] === 'error:') {
+      const error = message.split(' ').slice(3).join(' ').trim()
+      return { type: 'error', error }
     }
+
+    return { type: 'log', message: log }
   }
 
   module.logBuffer = ''
@@ -42,31 +45,41 @@ module.exports = () => {
       return
     }
 
+    let executable
     if (ctx.workload.platform === 'win') {
+      executable = path.resolve(ctx.workloadDir, 'bin', 'xmr-stak-rx.exe')
       env.PATH = `${env.PATH};${ctx.workloadDir}`
     } else if (ctx.workload.platform === 'linux') {
+      executable = path.resolve(ctx.workloadDir, 'bin', 'xmr-stak-rx')
       env.LD_LIBRARY_PATH = `$LD_LIBRARY_PATH:${ctx.workloadDir}`
+    } else if (ctx.workload.platform === 'mac') {
+      executable = path.resolve(ctx.workloadDir, 'bin', 'xmr-stak-rx')
     }
 
     const params = [
       '-o', `${ctx.workload.host}:${ctx.workload.port}`,
       '-u', ctx.poolUser,
-      '-a', ctx.workload.algorithmId === 'cryptonight-lite' ? 'cryptonight-lite' : 'cryptonight'
+      '-p', 'x',
+      '-r', 'worker',
+      '--noTest', true,
+      '--h-print-time', 1,
+      '--currency', ctx.workload.algorithmId
     ]
 
-    if (ctx.workloadSettings['cpu-priority'] !== undefined) {
-      params.push('--cpu-priority', ctx.workloadSettings['cpu-priority'])
-    }
-    if (ctx.workloadSettings['cpu-threads'] !== undefined) {
-      params.push('--threads', ctx.workloadSettings['cpu-threads'])
+    if (ctx.workload.architecture === 'cpu') {
+      params.push('--noAMD')
+      params.push('--noNVIDIA')
+    } else if (ctx.workload.architecture === 'nvdia') {
+      params.push('--noAMD')
+      params.push('--noCPU')
+    } else if (ctx.workload.architecture === 'amd') {
+      params.push('--noCPU')
+      params.push('--noNVIDIA')
     }
 
     try {
-      const executable = path.resolve(ctx.workloadDir, 'build', 'Release', `cudo.node`)
-      const child = path.resolve(ctx.workloadDir, 'build', 'Release', 'child.js')
       fs.accessSync(executable, fs.constants.R_OK)
-      fs.accessSync(child, fs.constants.R_OK)
-      module.proc = fork(child, [executable, ...params], {
+      module.proc = execFile(executable, params, {
         silent: true,
         env
       })
@@ -78,7 +91,7 @@ module.exports = () => {
 
     // Pass through and console output or errors to event emitter
     module.proc.stdout.on('data', data => module.readLog(data))
-    module.proc.stderr.on('data', data => module.readLog(data))
+    module.proc.stderr.on('data', data => module.emit('error', data.toString()))
 
     // Update state when kill has completed and restart if it has already been triggered
     module.proc.on('exit', code => {

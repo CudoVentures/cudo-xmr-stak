@@ -7,6 +7,9 @@
     "type": "git",
     "url": "https://github.com/CudoVentures/cudo-xmr-stak.git"
   },
+  "scripts": {
+    "test": "mocha addon/test.spec.js"
+  },
   "devDependencies": {
     "@google-cloud/storage": "^2.5.0",
     "chai": "^4.2.0",

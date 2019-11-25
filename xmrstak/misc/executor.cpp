@@ -760,12 +760,14 @@ void executor::hashrate_report(std::string& out)
 			std::string name(xmrstak::iBackend::getName(bType));
 			std::transform(name.begin(), name.end(), name.begin(), ::toupper);
 
+			/*
 			out.append("HASHRATE REPORT - ").append(name).append("\n");
 			out.append("| ID |    10s |    60s |    15m |");
 			if(nthd != 1)
 				out.append(" ID |    10s |    60s |    15m |\n");
 			else
 				out.append(1, '\n');
+			*/
 
 			double fTotalCur[3] = {0.0, 0.0, 0.0};
 			for(i = 0; i < nthd; i++)
@@ -777,11 +779,13 @@ void executor::hashrate_report(std::string& out)
 				fHps[1] = telem->calc_telemetry_data(60000, tid);
 				fHps[2] = telem->calc_telemetry_data(900000, tid);
 
+				/*
 				snprintf(num, sizeof(num), "| %2u |", (unsigned int)i);
 				out.append(num);
 				out.append(hps_format(fHps[0], num, sizeof(num))).append(" |");
 				out.append(hps_format(fHps[1], num, sizeof(num))).append(" |");
 				out.append(hps_format(fHps[2], num, sizeof(num))).append(1, ' ');
+				*/
 
 				fTotal[0] += (std::isnormal(fHps[0])) ? fHps[0] : 0.0;
 				fTotal[1] += (std::isnormal(fHps[1])) ? fHps[1] : 0.0;
@@ -791,10 +795,13 @@ void executor::hashrate_report(std::string& out)
 				fTotalCur[1] += (std::isnormal(fHps[1])) ? fHps[1] : 0.0;
 				fTotalCur[2] += (std::isnormal(fHps[2])) ? fHps[2] : 0.0;
 
+				/*
 				if((i & 0x1) == 1) //Odd i's
 					out.append("|\n");
+				*/
 			}
 
+			/*
 			if((i & 0x1) == 1) //We had odd number of threads
 				out.append("|\n");
 
@@ -805,6 +812,7 @@ void executor::hashrate_report(std::string& out)
 			out.append(" H/s\n");
 
 			out.append("-----------------------------------------------------------------\n");
+			*/
 		}
 	}
 
@@ -812,10 +820,10 @@ void executor::hashrate_report(std::string& out)
 	out.append(hps_format(fTotal[0], num, sizeof(num)));
 	out.append(hps_format(fTotal[1], num, sizeof(num)));
 	out.append(hps_format(fTotal[2], num, sizeof(num)));
-	out.append(" H/s\nHighest: ");
-	out.append(hps_format(fHighestHps, num, sizeof(num)));
+	//out.append(" H/s\nHighest: ");
+	//out.append(hps_format(fHighestHps, num, sizeof(num)));
 	out.append(" H/s\n");
-	out.append("-----------------------------------------------------------------\n");
+	//out.append("-----------------------------------------------------------------\n");
 }
 
 char* time_format(char* buf, size_t len, std::chrono::system_clock::time_point time)

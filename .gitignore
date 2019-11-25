@@ -30,3 +30,6 @@ cmake-build-debug/
 
 # Thumbnails
 ._*
+
+node_modules
+.DS_Store
