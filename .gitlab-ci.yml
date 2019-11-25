@@ -65,7 +65,7 @@ pack-mac:
   script:
     - mkdir build-mac
     - cd build-mac
-    - cmake .. -DOPENSSL_ROOT_DIR=/usr/local/opt/openssl -DCUDA_ENABLE=ON -DOpenCL_ENABLE=ON
+    - cmake .. -DOPENSSL_ROOT_DIR=/usr/local/opt/openssl -DCUDA_ENABLE=OFF -DOpenCL_ENABLE=ON
     - make install
   artifacts:
     paths:
