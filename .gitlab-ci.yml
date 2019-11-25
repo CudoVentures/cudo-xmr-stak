@@ -16,19 +16,19 @@ pack-win:
     - build
     - win
   script:
-    - mkdir build
-    - cd build
+    - mkdir build-win
+    - cd build-win
     - cmake -G "Visual Studio 15 2017 Win64" -T v141,host=x64 ..
     - cmake --build . --config Release --target install
     - cd bin/Release
     - copy C:\xmr-stak-dep\openssl\bin\* .
   artifacts:
     paths:
-      - build/bin/Release
+      - build-win/bin/Release
 
 pack-linux:
   stage: build
-  image: ubuntu:16.04
+  image: nvidia/cuda:9.2-devel-ubuntu18.04
   cache:
     key: linux
     paths:
@@ -38,22 +38,19 @@ pack-linux:
     - build
     - linux
   before_script:
-    - apt-get update
-    - apt-get install -y curl sudo
-    - curl -sL https://deb.nodesource.com/setup_10.x | sudo -E bash -
-    - curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | sudo apt-key add -
-    - echo "deb https://dl.yarnpkg.com/debian/ stable main" | sudo tee /etc/apt/sources.list.d/yarn.list
-    - apt-get update
-    - apt-get install -y git build-essential libuv1-dev libmicrohttpd-dev libssl-dev cmake yarn nodejs
-    - yarn --ignore-scripts
-    - yarn --cwd addon
+    - apt update
+    - apt install -y libmicrohttpd-dev libssl-dev cmake build-essential libhwloc-dev git ocl-icd-opencl-dev wget
+    - wget https://storage.googleapis.com/cudo-download/tools/AMD-APP-SDK-v3.0.130.136-GA-linux64.sh
+    - chmod +x AMD-APP-SDK-v3.0.130.136-GA-linux64.sh
+    - ./AMD-APP-SDK-v3.0.130.136-GA-linux64.sh
   script:
-    - yarn --cwd addon build
-    - yarn build:node
-    - yarn build:electron
+    - mkdir build-linux
+    - cd build-linux
+    - cmake ..
+    - make install
   artifacts:
     paths:
-      - prebuilds
+      - build-linux/bin/Release
 
 pack-mac:
   stage: build
@@ -65,16 +62,14 @@ pack-mac:
     - shell
     - build
     - mac
-  before_script:
-    - yarn --ignore-scripts
-    - yarn --cwd addon
   script:
-    - yarn --cwd addon build
-    - yarn build:node
-    - yarn build:electron
+    - mkdir build-mac
+    - cd build-mac
+    - cmake .. -DOPENSSL_ROOT_DIR=/usr/local/opt/openssl -DCUDA_ENABLE=OFF -DOpenCL_ENABLE=ON
+    - make install
   artifacts:
     paths:
-      - prebuilds
+      - build-mac/bin/Release
 
 upload-prebuilds:
   stage: publish
@@ -95,15 +90,9 @@ upload-prebuilds:
     - docker
     - build
     - linux
-  before_script:
-    - apt-get update
-    - apt-get install -y apt-transport-https
-    - curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add -
-    - echo "deb https://dl.yarnpkg.com/debian/ stable main" | tee /etc/apt/sources.list.d/yarn.list
-    - curl -sL https://deb.nodesource.com/setup_10.x | bash -
-    - apt-get install -y yarn nodejs
-    - echo $GCLOUD_BUILD_CREDENTIALS | base64 -d > /build-credentials.json
-    - gcloud auth activate-service-account --key-file /build-credentials.json
-    - yarn --ignore-scripts
   script:
-    - node scripts/upload.js
+    - VERSION=$(cat package.json | grep version | head -1 | awk -F: '{ print $2 }' | sed 's/[",]//g' | tr -d '[[:space:]]')
+    - tar -czvf win-$VERSION.tar.gz build-win/bin/*.dll build-win/bin/xmr-stak.exe
+    - tar -czvf linux-$VERSION.tar.gz build-linux/bin/xmr-stak
+    - tar -czvf mac-$VERSION.tar.gz build-mac/bin/xmr-stak
+    - ls -l
