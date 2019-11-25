@@ -11,8 +11,6 @@ module.exports = () => {
   module.isRunning = false
   module.proc = null
 
-  // 20190327 11:24:44 NVML is disabled. You wont see GPUs stats.
-  // 20190327 11:16:23 [ OK ] 1/1 - 12.02 MH/s, 32ms
   module.parseLog = message => {
     const parts = message.toLowerCase().split(' ').filter(o => o)
     const log = message.split(' ').slice(3).join(' ').trim()
@@ -20,8 +18,8 @@ module.exports = () => {
     if (parts[0] === 'totals' && parts[1] === '(all):' && parts[2]) {
       let hashRate = parseFloat(parts[2] || 0) || 0
       return { type: 'hashRate', hashRate }
-    } if (parts[2] === 'error:') {
-      const error = message.split(' ').slice(3).join(' ').trim()
+    } if (parts[3] === 'error:') {
+      const error = message.split(' ').slice(4).join(' ').trim()
       return { type: 'error', error }
     }
 

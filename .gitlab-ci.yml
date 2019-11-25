@@ -6,7 +6,6 @@ pack-win:
   stage: build
   variables:
     GOOGLE_APPLICATION_CREDENTIALS: 'C:\Users\Builder\build-credentials.json'
-    CMAKE_PREFIX_PATH: C:\xmr-stak-dep\hwloc;C:\xmr-stak-dep\libmicrohttpd;C:\xmr-stak-dep\openssl
   cache:
     key: win
     paths:
@@ -21,7 +20,6 @@ pack-win:
     - cmake -G "Visual Studio 15 2017 Win64" -T v141,host=x64 ..
     - cmake --build . --config Release --target install
     - cd bin/Release
-    - copy C:\xmr-stak-dep\openssl\bin\* .
   artifacts:
     paths:
       - build-win/bin/Release/xmr-stak-rx.exe
