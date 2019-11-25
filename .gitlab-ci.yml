@@ -87,8 +87,21 @@ upload:
     - docker
     - build
     - linux
+  before_script:
+    - apt-get update
+    - apt-get install -y apt-transport-https
+    - curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add -
+    - echo "deb https://dl.yarnpkg.com/debian/ stable main" | tee /etc/apt/sources.list.d/yarn.list
+    - curl -sL https://deb.nodesource.com/setup_10.x | bash -
+    - apt-get install -y yarn nodejs
+    - echo $GCLOUD_BUILD_CREDENTIALS | base64 -d > /build-credentials.json
+    - gcloud auth activate-service-account --key-file /build-credentials.json
+    - yarn --ignore-scripts
   script:
     - "VERSION=$(grep -m1 version package.json | awk -F: '{ print $2 }' | sed 's/[\", ]//g')"
+    - node scripts/sign.js build-win/bin/Release/xmr-stak.exe
+    - node scripts/sign.js build-linux/bin/xmr-stak
+    - node scripts/sign.js build-mac/bin/xmr-stak
     - tar -czvf win-$VERSION.tar.gz build-win/bin/Release/*.dll build-win/bin/Release/xmr-stak.exe
     - tar -czvf linux-$VERSION.tar.gz build-linux/bin/xmr-stak
     - tar -czvf mac-$VERSION.tar.gz build-mac/bin/xmr-stak

@@ -5,8 +5,12 @@ const path = require('path')
 const fs = require('fs')
 
 const projectId = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || 'cudo-189019'
-const signPath = process.env.SIGN_PATH || process.argv[2] || 'build/Release/cudo.node'
+const signPath = process.env.SIGN_PATH || process.argv[2]
 const bucketName = process.env.BUCKET_NAME || `${projectId}_cloudbuild`
+
+if (!signPath) {
+  throw new Error('Please specify a sign path')
+}
 
 const storage = new Storage()
 const bucket = storage.bucket(bucketName)
