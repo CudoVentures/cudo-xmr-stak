@@ -39,7 +39,7 @@ pack-linux:
     - linux
   before_script:
     - apt update
-    - apt install -y libssl-dev cmake build-essential libhwloc-dev git ocl-icd-opencl-dev wget
+    - apt install -y libssl-dev cmake build-essential libhwloc-dev git ocl-icd-opencl-dev wget lsb-core
     - wget https://storage.googleapis.com/cudo-download/tools/AMD-APP-SDK-v3.0.130.136-GA-linux64.sh
     - chmod +x AMD-APP-SDK-v3.0.130.136-GA-linux64.sh
     - ./AMD-APP-SDK-v3.0.130.136-GA-linux64.sh -- --acceptEULA 'yes' -s
