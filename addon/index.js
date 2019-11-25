@@ -47,13 +47,13 @@ module.exports = () => {
 
     let executable
     if (ctx.workload.platform === 'win') {
-      executable = path.resolve(ctx.workloadDir, 'bin', 'xmr-stak-rx.exe')
+      executable = path.resolve(ctx.workloadDir, 'xmr-stak-rx.exe')
       env.PATH = `${env.PATH};${ctx.workloadDir}`
     } else if (ctx.workload.platform === 'linux') {
-      executable = path.resolve(ctx.workloadDir, 'bin', 'xmr-stak-rx')
+      executable = path.resolve(ctx.workloadDir, 'xmr-stak-rx')
       env.LD_LIBRARY_PATH = `$LD_LIBRARY_PATH:${ctx.workloadDir}`
     } else if (ctx.workload.platform === 'mac') {
-      executable = path.resolve(ctx.workloadDir, 'bin', 'xmr-stak-rx')
+      executable = path.resolve(ctx.workloadDir, 'xmr-stak-rx')
     }
 
     const params = [
