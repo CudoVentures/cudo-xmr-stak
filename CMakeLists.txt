@@ -72,10 +72,10 @@ if(CUDA_ENABLE)
     if(CUDA_FOUND)
         # required for monero's cryptonight_r
         # libcuda
-        find_library(CUDA_LIB 
+        find_library(CUDA_LIB
         NAMES
-            libcuda 
-            cuda 
+            libcuda
+            cuda
             cuda.lib
         HINTS
             ${CUDA_TOOLKIT_ROOT_DIR}
@@ -91,16 +91,16 @@ if(CUDA_ENABLE)
             lib)
 
         #nvrtc
-        find_library(CUDA_NVRTC_LIB 
+        find_library(CUDA_NVRTC_LIB
         NAMES
-            libnvrtc 
-            nvrtc 
+            libnvrtc
+            nvrtc
             nvrtc.lib
-        HINTS 
-            ${CUDA_TOOLKIT_ROOT_DIR} 
+        HINTS
+            ${CUDA_TOOLKIT_ROOT_DIR}
             ${LIBNVRTC_LIBRARY_DIR}
             ${CUDA_TOOLKIT_ROOT_DIR}
-            /usr 
+            /usr
             /usr/local/cuda
         PATH_SUFFIXES
             lib64
@@ -339,7 +339,7 @@ endif()
 # Find microhttpd
 ################################################################################
 
-option(MICROHTTPD_ENABLE "Enable or disable the requirement of microhttp (http daemon)" ON)
+option(MICROHTTPD_ENABLE "Enable or disable the requirement of microhttp (http daemon)" OFF)
 if(MICROHTTPD_ENABLE)
     find_path(MTHD_INCLUDE_DIR
         NAMES
@@ -375,7 +375,7 @@ endif()
 # Find OpenSSL
 ###############################################################################
 
-option(OpenSSL_ENABLE "Enable or disable the requirement of OpenSSL" ON)
+option(OpenSSL_ENABLE "Enable or disable the requirement of OpenSSL" OFF)
 if(OpenSSL_ENABLE)
     find_package(OpenSSL)
     if(OPENSSL_FOUND)
@@ -599,7 +599,7 @@ if(CUDA_FOUND)
     else()
         set(CUDA_LIBRARIES ${CUDA_LIBRARIES} ${CUDA_NVRTC_LIB})
     endif()
-    
+
     target_link_libraries(xmrstak_cuda_backend ${CUDA_LIBRARIES})
     target_link_libraries(xmrstak_cuda_backend xmr-stak-backend xmr-stak-asm)
 endif()

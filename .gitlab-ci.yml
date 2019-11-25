@@ -1,0 +1,109 @@
+stages:
+  - build
+  - publish
+
+pack-win:
+  stage: build
+  variables:
+    GOOGLE_APPLICATION_CREDENTIALS: 'C:\Users\Builder\build-credentials.json'
+    CMAKE_PREFIX_PATH: C:\xmr-stak-dep\hwloc;C:\xmr-stak-dep\libmicrohttpd;C:\xmr-stak-dep\openssl
+  cache:
+    key: win
+    paths:
+      - node_modules
+  tags:
+    - shell
+    - build
+    - win
+  script:
+    - mkdir build
+    - cd build
+    - cmake -G "Visual Studio 15 2017 Win64" -T v141,host=x64 ..
+    - cmake --build . --config Release --target install
+    - cd bin/Release
+    - copy C:\xmr-stak-dep\openssl\bin\* .
+  artifacts:
+    paths:
+      - build/bin/Release
+
+pack-linux:
+  stage: build
+  image: ubuntu:16.04
+  cache:
+    key: linux
+    paths:
+      - node_modules
+  tags:
+    - docker
+    - build
+    - linux
+  before_script:
+    - apt-get update
+    - apt-get install -y curl sudo
+    - curl -sL https://deb.nodesource.com/setup_10.x | sudo -E bash -
+    - curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | sudo apt-key add -
+    - echo "deb https://dl.yarnpkg.com/debian/ stable main" | sudo tee /etc/apt/sources.list.d/yarn.list
+    - apt-get update
+    - apt-get install -y git build-essential libuv1-dev libmicrohttpd-dev libssl-dev cmake yarn nodejs
+    - yarn --ignore-scripts
+    - yarn --cwd addon
+  script:
+    - yarn --cwd addon build
+    - yarn build:node
+    - yarn build:electron
+  artifacts:
+    paths:
+      - prebuilds
+
+pack-mac:
+  stage: build
+  cache:
+    key: mac
+    paths:
+      - node_modules
+  tags:
+    - shell
+    - build
+    - mac
+  before_script:
+    - yarn --ignore-scripts
+    - yarn --cwd addon
+  script:
+    - yarn --cwd addon build
+    - yarn build:node
+    - yarn build:electron
+  artifacts:
+    paths:
+      - prebuilds
+
+upload-prebuilds:
+  stage: publish
+  image:
+    name: gcr.io/cloud-builders/gsutil
+    entrypoint:
+      - ''
+  only:
+    refs:
+      - tags
+  variables:
+    GOOGLE_APPLICATION_CREDENTIALS: /build-credentials.json
+  dependencies:
+    - pack-win
+    - pack-mac
+    - pack-linux
+  tags:
+    - docker
+    - build
+    - linux
+  before_script:
+    - apt-get update
+    - apt-get install -y apt-transport-https
+    - curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add -
+    - echo "deb https://dl.yarnpkg.com/debian/ stable main" | tee /etc/apt/sources.list.d/yarn.list
+    - curl -sL https://deb.nodesource.com/setup_10.x | bash -
+    - apt-get install -y yarn nodejs
+    - echo $GCLOUD_BUILD_CREDENTIALS | base64 -d > /build-credentials.json
+    - gcloud auth activate-service-account --key-file /build-credentials.json
+    - yarn --ignore-scripts
+  script:
+    - node scripts/upload.js

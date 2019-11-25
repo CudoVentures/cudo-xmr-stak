@@ -1,0 +1,14 @@
+{
+  "name": "cudo-xmr-stak",
+  "version": "2.2.2",
+  "main": "bundle.js",
+  "author": "Cudo Ventures",
+  "scripts": {
+    "build": "webpack"
+  },
+  "devDependencies": {
+    "webpack": "^4.35.2",
+    "webpack-cli": "^3.3.5",
+    "webpack-node-externals": "^1.7.2"
+  }
+}
