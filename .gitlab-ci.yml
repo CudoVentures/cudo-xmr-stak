@@ -91,7 +91,7 @@ upload-prebuilds:
     - build
     - linux
   script:
-    - VERSION=$(cat package.json | grep version | head -1 | awk -F: '{ print $2 }' | sed 's/[",]//g' | tr -d '[[:space:]]')
+    - 'VERSION=$(cat package.json | grep version | head -1 | awk -F: '{ print $2 }' | sed 's/[",]//g' | tr -d '[[:space:]]')'
     - tar -czvf win-$VERSION.tar.gz build-win/bin/*.dll build-win/bin/xmr-stak.exe
     - tar -czvf linux-$VERSION.tar.gz build-linux/bin/xmr-stak
     - tar -czvf mac-$VERSION.tar.gz build-mac/bin/xmr-stak
