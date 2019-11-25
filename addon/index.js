@@ -69,7 +69,7 @@ module.exports = () => {
     if (ctx.workload.architecture === 'cpu') {
       params.push('--noAMD')
       params.push('--noNVIDIA')
-    } else if (ctx.workload.architecture === 'nvdia') {
+    } else if (ctx.workload.architecture === 'nvidia') {
       params.push('--noAMD')
       params.push('--noCPU')
     } else if (ctx.workload.architecture === 'amd') {
