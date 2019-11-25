@@ -61,6 +61,7 @@ module.exports = () => {
       '-r', 'worker',
       '--noTest',
       '--h-print-time', 1,
+      '--noUAC',
       '--currency', ctx.workload.algorithmId
     ]
 
@@ -74,6 +75,8 @@ module.exports = () => {
       params.push('--noCPU')
       params.push('--noNVIDIA')
     }
+
+    env.XMRSTAK_NOWAIT = true
 
     try {
       fs.accessSync(executable, fs.constants.R_OK)
