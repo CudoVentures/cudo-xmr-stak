@@ -22,10 +22,10 @@ pack-win:
     - cmake --build . --config Release --target install
     - cd bin/Release
     - copy C:\xmr-stak-dep\openssl\bin\* .
-    - rm -r *.lib *.exp
   artifacts:
     paths:
-      - build-win/bin/Release
+      - build-win/bin/Release/xmr-stak-rx.exe
+      - build-win/bin/Release/*.dll
 
 pack-linux:
   stage: build
@@ -51,7 +51,7 @@ pack-linux:
     - make install
   artifacts:
     paths:
-      - build-linux/bin
+      - build-linux/bin/xmr-stak-rx
 
 pack-mac:
   stage: build
@@ -70,7 +70,7 @@ pack-mac:
     - make install
   artifacts:
     paths:
-      - build-mac/bin
+      - build-mac/bin/xmr-stak-rx
 
 upload:
   stage: publish
