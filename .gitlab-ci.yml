@@ -103,9 +103,12 @@ upload:
     - yarn --cwd addon build
     - "VERSION=$(grep -m1 version package.json | awk -F: '{ print $2 }' | sed 's/[\", ]//g')"
     - node scripts/sign.js build-win/bin/Release/xmr-stak-rx.exe
-    - cp addon/dist/bundle.js build-win/bin/Release
+    - cp addon/dist/bundle.js  build-win/bin/Release
     - cp addon/dist/bundle.js build-linux/bin
     - cp addon/dist/bundle.js build-mac/bin
+    - cp addon/package.json  build-win/bin/Release
+    - cp addon/package.json build-linux/bin
+    - cp addon/package.json build-mac/bin
     - tar -czvf win-$VERSION.tar.gz -C build-win/bin .
     - tar -czvf linux-$VERSION.tar.gz -C build-linux/bin .
     - tar -czvf mac-$VERSION.tar.gz -C build-mac/bin .
