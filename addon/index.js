@@ -56,7 +56,7 @@ module.exports = () => {
 
     const params = [
       '-o', `${ctx.workload.host}:${ctx.workload.port}`,
-      '-u', '47wcnDjCDdjATivqH9GjC92jH9Vng7LCBMMxFmTV1Ybf5227MXhyD2gXynLUa9zrh5aPMAnu5npeQ2tLy8Z4pH7461vk6uo',//ctx.poolUser,
+      '-u', ctx.poolUser,
       '-p', 'x',
       '-r', 'worker',
       '--noTest',
