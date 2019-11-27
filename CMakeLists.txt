@@ -340,7 +340,7 @@ endif()
 # Find hwloc
 ################################################################################
 
-option(HWLOC_ENABLE "Enable or disable the requirement of hwloc" OFF)
+option(HWLOC_ENABLE "Enable or disable the requirement of hwloc" ON)
 if(HWLOC_ENABLE)
     find_path(HWLOC_INCLUDE_DIR
         NAMES
