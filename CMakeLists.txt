@@ -13,11 +13,11 @@ set(CMAKE_CXX_STANDARD 11)
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake")
 
+set(HWLOC_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/xmr-stak-dep/hwloc/include")
+
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}" CACHE PATH "install prefix" FORCE)
 endif(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
-
-list(APPEND CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/xmr-stak-dep/hwloc")
 
 # help to find cuda on systems with a software module system
 list(APPEND CMAKE_PREFIX_PATH "$ENV{CUDA_ROOT}")
@@ -30,6 +30,8 @@ list(APPEND CMAKE_PREFIX_PATH "$ENV{AMDAPPSDKROOT}")
 
 # allow user to extent CMAKE_PREFIX_PATH via environment variable
 list(APPEND CMAKE_PREFIX_PATH "$ENV{CMAKE_PREFIX_PATH}")
+
+list(APPEND CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/xmr-stak-dep/hwloc")
 
 ################################################################################
 # CMake user options
