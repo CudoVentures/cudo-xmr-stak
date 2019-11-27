@@ -81,8 +81,9 @@ module.exports = () => {
     try {
       fs.accessSync(executable, fs.constants.R_OK)
       module.proc = execFile(executable, params, {
-        silent: true,
-        env
+        cwd: ctx.workloadDir,
+        env,
+        silent: true
       })
     } catch (err) {
       module.emit('error', err.toString())
