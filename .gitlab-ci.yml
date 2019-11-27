@@ -111,6 +111,9 @@ upload:
     - tar -czvf win-$VERSION.tar.gz -C build-win/bin/Release .
     - tar -czvf linux-$VERSION.tar.gz -C build-linux/bin .
     - tar -czvf mac-$VERSION.tar.gz -C build-mac/bin .
-    - gsutil cp win-$VERSION.tar.gz gs://cudo-download/images/cudo-xmr-stak/win/x64/$VERSION-rx.tar.gz
-    - gsutil cp linux-$VERSION.tar.gz gs://cudo-download/images/cudo-xmr-stak/linux/x64/$VERSION-rx.tar.gz
-    - gsutil cp mac-$VERSION.tar.gz gs://cudo-download/images/cudo-xmr-stak/mac/x64/$VERSION-rx.tar.gz
+    - gsutil cp win-$VERSION.tar.gz gs://cudo-download/images/cudo-xmr-stak-rx/win/x64/$VERSION-rx.tar.gz
+    - gsutil cp linux-$VERSION.tar.gz gs://cudo-download/images/cudo-xmr-stak-rx/linux/x64/$VERSION-rx.tar.gz
+    - gsutil cp mac-$VERSION.tar.gz gs://cudo-download/images/cudo-xmr-stak-rx/mac/x64/$VERSION-rx.tar.gz
+    - gsutil -m setmeta -h 'Cache-Control:no-cache' gs://cudo-download/images/cudo-xmr-stak-rx/win/x64/*
+    - gsutil -m setmeta -h 'Cache-Control:no-cache' gs://cudo-download/images/cudo-xmr-stak-rx/linux/x64/*
+    - gsutil -m setmeta -h 'Cache-Control:no-cache' gs://cudo-download/images/cudo-xmr-stak-rx/mac/x64/*
