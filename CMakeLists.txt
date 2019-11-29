@@ -51,7 +51,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "${BUILD_TYPE}")
 
-set(XMR-STAK_COMPILE "native" CACHE STRING "select CPU compute architecture")
+set(XMR-STAK_COMPILE "generic" CACHE STRING "select CPU compute architecture")
 set_property(CACHE XMR-STAK_COMPILE PROPERTY STRINGS "native;generic;dev_release")
 if(XMR-STAK_COMPILE STREQUAL "native")
     if(NOT CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
@@ -65,7 +65,7 @@ else()
 endif()
 
 # option to add static libgcc and libstdc++
-option(CMAKE_LINK_STATIC "link as much as possible libraries static" OFF)
+option(CMAKE_LINK_STATIC "link as much as possible libraries static" ON)
 
 ################################################################################
 # Find CUDA
